@@ -43,6 +43,10 @@ class StrideEstimator(
     var strideMeters: Double? = initialStrideMeters
         private set
 
+    /** How many windows taught the stride in this session. */
+    var sampleCount: Int = 0
+        private set
+
     fun addSteps(steps: Long) {
         if (steps <= 0L) return
         windowSteps += steps
@@ -68,6 +72,7 @@ class StrideEstimator(
     fun reset() {
         breakWindow()
         strideMeters = initial
+        sampleCount = 0
     }
 
     private fun flushIfReady() {
@@ -76,6 +81,7 @@ class StrideEstimator(
             if (sample in minStride..maxStride) {
                 val current = strideMeters
                 strideMeters = if (current == null) sample else current + alpha * (sample - current)
+                sampleCount++
             }
             breakWindow()
         } else if (windowSteps >= abandonSteps && windowMeters < minMeters) {

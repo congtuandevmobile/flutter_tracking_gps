@@ -8,7 +8,7 @@ The plugin Flutter registers. It is thin on purpose: it forwards to `TrackingEng
 ## Members
 | Member | Description |
 |---|---|
-| `static let engine` | Process-wide `TrackingEngine`, created lazily on the main thread (CoreLocation needs a run loop) with `CoreLocationProvider` and `FileFixStore` in Application Support. It lives beyond the Flutter engine so a recording does not stop when the engine detaches. |
+| `static let engine` | Process-wide `TrackingEngine`, created lazily on the main thread (CoreLocation needs a run loop) with `CoreLocationProvider` and `FileJournalStore` in Application Support (`flutter_tracking_gps/journal`). It lives beyond the Flutter engine so a recording does not stop when the engine detaches. |
 | `register(with:)` | Creates the instance, registers the Pigeon API and the fix and snapshot stream handlers, and sets `engine.fixObserver` and `engine.snapshotObserver` (weak references to the plugin). |
 | `detachFromEngine(for:)` | Unregisters the API, clears both observers, the event sinks and the messenger. The recording keeps going. |
 | `TrackingHostApi` methods | `permissionStatus`, `requestPermission`, `start`, `pause`, `resume`, `stop`, `getSnapshot`, `submitPdr` (with the segment), `restoreSession`, `getReport`, `readPersistedFixes`, `clearSession`: each forwards to the engine. |
@@ -21,3 +21,5 @@ Results on the main thread, `[weak self]` / weak references in closures and call
 Contract: `pigeons/tracking_api.dart` (generated in `TrackingApi.g.swift`).
 
 Added: `stepsPermissionStatus()` and `requestStepsPermission(completion:)` forwarded to the engine. `StartConfig.foregroundMode` is ignored on iOS.
+
+New `listSessions(completion:)`. The journal directory is `flutter_tracking_gps/journal` under Application Support.

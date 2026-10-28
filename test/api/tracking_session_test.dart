@@ -14,7 +14,6 @@ class FakePlatform implements TrackingPlatform {
   PlatformState state = PlatformState.idle;
   List<TrackingFix> persisted = [];
   final calls = <String>[];
-  AndroidForegroundMode? lastForegroundMode;
   bool? lastStepsEnabled;
   late GpsDistanceEngine engine;
   String? sessionId;
@@ -79,10 +78,8 @@ class FakePlatform implements TrackingPlatform {
     required String notificationText,
     required bool stepsEnabled,
     required int initialSteps,
-    required AndroidForegroundMode foregroundMode,
   }) async {
     calls.add('start');
-    lastForegroundMode = foregroundMode;
     lastStepsEnabled = stepsEnabled;
     this.sessionId = sessionId;
     segment = startSegmentId;
@@ -166,6 +163,9 @@ class FakePlatform implements TrackingPlatform {
 
   @override
   Future<void> clearSession(String sessionId) async => calls.add('clear');
+
+  @override
+  Future<List<String>> listSessions() async => [?sessionId];
 }
 
 Future<void> pumpEvents() => Future<void>.delayed(Duration.zero);
@@ -269,6 +269,40 @@ void main() {
     final session = TrackingSession(platform: platform);
     await session.start(sessionId: 's');
     expect(await session.report(), contains('TIMELINE'));
+    await session.dispose();
+  });
+
+  test('finishing is NOT final, and unsaved events are public', () async {
+    final platform = FakePlatform();
+    final session = TrackingSession(platform: platform);
+    await session.start(sessionId: 's');
+    platform.snapshotController.add(
+      const PlatformSnapshot(
+        sessionId: 's',
+        state: PlatformState.finishing,
+        segmentId: 0,
+        fixCount: 0,
+        journalPending: 3,
+      ),
+    );
+    await pumpEvents();
+    expect(session.snapshot.state, RecordingState.finishing);
+    expect(session.snapshot.isDurable, isFalse);
+    expect(session.snapshot.stepsFinal, isFalse);
+    // A second start while finishing is refused, like while running.
+    expect(() => session.start(sessionId: 'again'), throwsA(isA<TrackingStateError>()));
+    platform.snapshotController.add(
+      const PlatformSnapshot(
+        sessionId: 's',
+        state: PlatformState.stopped,
+        segmentId: 0,
+        fixCount: 0,
+        stepsFinal: true,
+      ),
+    );
+    await pumpEvents();
+    expect(session.snapshot.state, RecordingState.finished);
+    expect(session.snapshot.isDurable, isTrue);
     await session.dispose();
   });
 }

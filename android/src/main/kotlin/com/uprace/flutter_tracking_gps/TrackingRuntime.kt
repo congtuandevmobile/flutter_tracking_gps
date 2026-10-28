@@ -23,9 +23,9 @@ internal object TrackingRuntime {
     private fun createEngine(appContext: Context): TrackingEngine = TrackingEngine(
         source = FusedLocationSource(appContext),
         stepSource = SensorStepSource(appContext),
-        store = FileFixStore(File(appContext.filesDir, STORE_DIRECTORY)),
+        store = FileJournalStore(File(appContext.filesDir, STORE_DIRECTORY)),
         scope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
     )
 
-    private const val STORE_DIRECTORY = "flutter_tracking_gps"
+    private const val STORE_DIRECTORY = "flutter_tracking_gps/journal"
 }

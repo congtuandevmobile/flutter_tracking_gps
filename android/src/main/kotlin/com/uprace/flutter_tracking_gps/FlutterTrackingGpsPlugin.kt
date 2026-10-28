@@ -229,7 +229,7 @@ class FlutterTrackingGpsPlugin :
                 engine.markPermissionDenied()
                 return@command engine.snapshot()
             }
-            if (config.foregroundMode == NativeForegroundMode.BUILT_IN) startService(context, config)
+            startService(context, config.notificationTitle, config.notificationText)
             engine.start(config)
         }
     }
@@ -241,7 +241,17 @@ class FlutterTrackingGpsPlugin :
     }
 
     override fun resume(sessionId: String, callback: (Result<NativeSnapshot>) -> Unit) {
-        command(callback, TrackingErrorCode.RESUME_FAILED, "could not resume tracking") { _, engine ->
+        command(callback, TrackingErrorCode.RESUME_FAILED, "could not resume tracking") { context, engine ->
+            // After a process death (restore) the service is gone: it must be running BEFORE
+            // location, tick and steps start. If the OS refuses (for example a start from the
+            // background), recording does NOT continue: the session stays paused and the
+            // caller gets FOREGROUND_START_FAILED.
+            val extras = engine.sessionExtras()
+            try {
+                startService(context, extras["title"] ?: DEFAULT_TITLE, extras["text"] ?: DEFAULT_TEXT)
+            } catch (e: RuntimeException) {
+                throw e.toFlutterError(TrackingErrorCode.FOREGROUND_START_FAILED, "could not start the foreground service; recording stays paused")
+            }
             engine.resume(sessionId)
         }
     }
@@ -262,6 +272,8 @@ class FlutterTrackingGpsPlugin :
             updatedAtMs = System.currentTimeMillis(),
             distance = emptyDistance(),
             stepsStatus = NativeStepsStatus.OFF,
+            stepsFinal = false,
+            journalPending = 0,
         )
         return TrackingRuntime.engine(context).snapshot()
     }
@@ -274,6 +286,12 @@ class FlutterTrackingGpsPlugin :
     override fun restoreSession(config: StartConfig, callback: (Result<NativeSnapshot>) -> Unit) {
         command(callback, TrackingErrorCode.RESTORE_FAILED, "could not restore the session") { _, engine ->
             engine.restore(config)
+        }
+    }
+
+    override fun listSessions(callback: (Result<List<String>>) -> Unit) {
+        command(callback, TrackingErrorCode.STORE_LIST_FAILED, "could not list the sessions") { _, engine ->
+            engine.listSessions()
         }
     }
 
@@ -326,11 +344,11 @@ class FlutterTrackingGpsPlugin :
         }
     }
 
-    private fun startService(context: Context, config: StartConfig) {
+    private fun startService(context: Context, title: String, text: String) {
         val intent = Intent(context, TrackingService::class.java)
             .setAction(TrackingService.ACTION_START)
-            .putExtra(TrackingService.EXTRA_TITLE, config.notificationTitle)
-            .putExtra(TrackingService.EXTRA_TEXT, config.notificationText)
+            .putExtra(TrackingService.EXTRA_TITLE, title)
+            .putExtra(TrackingService.EXTRA_TEXT, text)
         ContextCompat.startForegroundService(context, intent)
     }
 
@@ -399,5 +417,7 @@ class FlutterTrackingGpsPlugin :
     private companion object {
         const val REQUEST_CODE = 7421
         const val STEPS_REQUEST_CODE = 7422
+        const val DEFAULT_TITLE = "Recording"
+        const val DEFAULT_TEXT = "Tracking your activity. Tap to return to the app."
     }
 }

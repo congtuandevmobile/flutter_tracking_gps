@@ -1,8 +1,8 @@
 import 'dart:async';
-import 'dart:developer' as developer;
-
+import 'package:flutter_tracking_gps/src/api/presenter_dispatcher.dart';
 import 'package:flutter_tracking_gps/src/api/tracking_presenter.dart';
 import 'package:flutter_tracking_gps/src/domain/tracking_config.dart';
+import 'package:flutter_tracking_gps/src/domain/tracking_fix.dart';
 import 'package:flutter_tracking_gps/src/domain/tracking_snapshot.dart';
 import 'package:flutter_tracking_gps/src/domain/tracking_state.dart';
 import 'package:flutter_tracking_gps/src/platform/tracking_platform.dart';
@@ -29,6 +29,7 @@ class TrackingSession {
     this.initialSteps = 0,
     this.presenter,
     this.onPresenterError,
+    this.presenterTimeout = const Duration(seconds: 5),
   }) : _platform = platform;
 
   final TrackingPlatform _platform;
@@ -38,9 +39,10 @@ class TrackingSession {
   /// limit consistent). Starting value, not measured on devices.
   final bool adaptiveSampling;
   final bool batterySaver;
-  /// Android default notification (ignored on iOS and when the presenter owns the
-  /// foreground service). Shown as is while recording; tapping it returns to the
-  /// app. No live data is shown in it.
+
+  /// Android notification of the SDK's foreground service (ignored on iOS).
+  /// Shown as is while recording; tapping it returns to the app. No live data is
+  /// shown in it. The service always runs, whatever the [presenter] does.
   final String notificationTitle;
   final String notificationText;
 
@@ -58,17 +60,24 @@ class TrackingSession {
 
   /// Shows the recording outside the app (a Live Activity, an ongoing
   /// notification...). null = none: iOS shows nothing extra and Android shows the
-  /// SDK's own default notification, which keeps the process alive.
+  /// SDK's own notification. Events are delivered in order, updates are
+  /// coalesced, and a slow or failing presenter never affects the recording.
   final TrackingPresenter? presenter;
 
-  /// Called when the [presenter] throws; the recording is not affected. Defaults
-  /// to a `dart:developer` log.
+  /// Called when the [presenter] throws or times out; the recording is not
+  /// affected. Defaults to a `dart:developer` log.
   final void Function(Object error, StackTrace stack)? onPresenterError;
 
-  AndroidForegroundMode get _foregroundMode =>
-      presenter?.ownsAndroidForegroundService == true
-      ? AndroidForegroundMode.external
-      : AndroidForegroundMode.builtIn;
+  /// Longest a single presenter call may take before it is reported and skipped.
+  final Duration presenterTimeout;
+
+  late final PresenterDispatcher? _dispatcher = presenter == null
+      ? null
+      : PresenterDispatcher(
+          presenter!,
+          onError: onPresenterError,
+          callTimeout: presenterTimeout,
+        );
 
   StreamSubscription<PlatformSnapshot>? _sub;
   String? _sessionId;
@@ -87,7 +96,8 @@ class TrackingSession {
 
   Future<void> start({required String sessionId}) async {
     if (_last.state == RecordingState.running ||
-        _last.state == RecordingState.paused) {
+        _last.state == RecordingState.paused ||
+        _last.state == RecordingState.finishing) {
       throw TrackingStateError('a recording is already open');
     }
     final permission = await _platform.permissionStatus();
@@ -109,17 +119,16 @@ class TrackingSession {
       notificationText: notificationText,
       stepsEnabled: stepsEnabled,
       initialSteps: initialSteps,
-      foregroundMode: _foregroundMode,
     );
     _requireRunning(native);
     _apply(native);
-    _present(_Present.start);
+    _present(PresenterEvent.start);
   }
 
   Future<void> pause() async {
     final id = _requireOpen(RecordingState.running);
     _apply(await _platform.pause(id));
-    _present(_Present.pause);
+    _present(PresenterEvent.pause);
   }
 
   Future<void> resume() async {
@@ -127,10 +136,12 @@ class TrackingSession {
     final native = await _platform.resume(id);
     _requireRunning(native);
     _apply(native);
-    _present(_Present.resume);
+    _present(PresenterEvent.resume);
   }
 
-  /// Ends the recording. The returned snapshot is final.
+  /// Ends the recording. Native answers only after its journal is durable and
+  /// the step count was finalized (see [TrackingSnapshot.stepsFinal]), so the
+  /// returned snapshot is final.
   Future<TrackingSnapshot> finish() async {
     final id = _sessionId;
     if (id == null || _last.state == RecordingState.idle) {
@@ -140,8 +151,21 @@ class TrackingSession {
     await _sub?.cancel();
     _sub = null;
     _apply(native);
-    _present(_Present.finish);
+    _present(PresenterEvent.finish);
     return _last;
+  }
+
+  /// The raw fixes of this session, for drawing the route live.
+  Stream<TrackingFix> get fixes =>
+      _platform.fixes.where((f) => f.sessionId == _sessionId);
+
+  /// The raw fixes persisted for this session, oldest first (after the writer
+  /// reached the disk): the route to draw or export once the recording is over,
+  /// or after a restore.
+  Future<List<TrackingFix>> persistedFixes({int afterSeq = -1}) async {
+    final id = _sessionId;
+    if (id == null) return const [];
+    return _platform.readPersistedFixes(id, afterSeq);
   }
 
   /// Frees what the platform persisted for this session (it holds
@@ -151,9 +175,12 @@ class TrackingSession {
     if (id != null) await _platform.clearSession(id);
   }
 
-  /// After a process death: native rebuilds its engine from the persisted fixes
-  /// (segments are never joined). The session comes back PAUSED; [resume]
-  /// continues it in a new segment. If native still runs it, nothing is replayed.
+  /// After a process death: native replays the session's journal with the
+  /// configuration it ran with (steps, pending estimates, stride, gaps and times
+  /// come back exactly; segments are never joined). The session comes back
+  /// PAUSED; [resume] continues it in a new segment. If native still runs it,
+  /// nothing is replayed. A damaged last record is dropped and reported in
+  /// [TrackingSnapshot.error]; an unusable journal throws.
   Future<void> restore({required String sessionId}) async {
     _sessionId = sessionId;
     _listen();
@@ -181,23 +208,29 @@ class TrackingSession {
   }
 
   Future<void> dispose() async {
-    await _presenterQueue;
     await _sub?.cancel();
     _sub = null;
+    await _dispatcher?.close(); // bounded: never hangs on a presenter that does not answer
     await _updates.close();
   }
 
   // ── Internals ───────────────────────────────────────────────────────────
 
   void _listen() {
-    _sub ??= _platform.snapshots.listen((native) {
-      if (native.sessionId != _sessionId) return;
-      _apply(native);
-      if (_last.state == RecordingState.running ||
-          _last.state == RecordingState.paused) {
-        _presentUpdate();
-      }
-    });
+    _sub ??= _platform.snapshots.listen(
+      (native) {
+        if (native.sessionId != _sessionId) return;
+        _apply(native);
+        if (!_last.hasNativeFailure &&
+            (_last.state == RecordingState.running ||
+                _last.state == RecordingState.paused)) {
+          _presentUpdate();
+        }
+      },
+      onError: (Object error, StackTrace stack) {
+        if (!_updates.isClosed) _updates.addError(error, stack);
+      },
+    );
   }
 
   void _apply(PlatformSnapshot native) {
@@ -208,9 +241,9 @@ class TrackingSession {
         PlatformState.idle => RecordingState.idle,
         PlatformState.running => RecordingState.running,
         PlatformState.paused => RecordingState.paused,
+        PlatformState.finishing => RecordingState.finishing,
         PlatformState.stopped => RecordingState.finished,
-        PlatformState.permissionDenied ||
-        PlatformState.error => _last.state,
+        PlatformState.permissionDenied || PlatformState.error => _last.state,
       },
       quality: d.quality,
       totalMeters: d.totalMeters,
@@ -227,6 +260,19 @@ class TrackingSession {
       steps: d.steps,
       strideMeters: d.strideMeters,
       stepsStatus: native.stepsStatus,
+      stepsFinal: native.stepsFinal,
+      journalPending: native.journalPending,
+      activeTime: d.activeTime,
+      bridgedGap: d.bridgedGap,
+      uncreditedGap: d.uncreditedGap,
+      uncreditedGaps: d.uncreditedGaps,
+      ambiguousSteps: d.ambiguousSteps,
+      failureState: switch (native.state) {
+        PlatformState.permissionDenied => TrackingFailureState.permissionDenied,
+        PlatformState.error => TrackingFailureState.error,
+        _ => TrackingFailureState.none,
+      },
+      error: native.error,
     );
     final changed =
         next.state != _last.state ||
@@ -238,61 +284,46 @@ class TrackingSession {
         next.movingTime != _last.movingTime ||
         next.isStopped != _last.isStopped ||
         next.fixCount != _last.fixCount ||
-        next.steps != _last.steps;
+        next.steps != _last.steps ||
+        next.stepsStatus != _last.stepsStatus ||
+        next.strideMeters != _last.strideMeters ||
+        next.lastFixAt != _last.lastFixAt ||
+        next.gpsMeters != _last.gpsMeters ||
+        next.gapBridgeMeters != _last.gapBridgeMeters ||
+        next.pdrMeters != _last.pdrMeters ||
+        next.failureState != _last.failureState ||
+        next.error != _last.error ||
+        next.stepsFinal != _last.stepsFinal ||
+        next.journalPending != _last.journalPending ||
+        next.uncreditedGap != _last.uncreditedGap ||
+        next.bridgedGap != _last.bridgedGap ||
+        next.ambiguousSteps != _last.ambiguousSteps;
     _last = next;
     if (changed && !_updates.isClosed) _updates.add(next);
   }
 
   // ── Presenter ───────────────────────────────────────────────────────────
 
-  Future<void> _presenterQueue = Future<void>.value();
   DateTime? _lastPresentedAt;
 
   /// Presenter updates are throttled to about once per second.
   static const _presentEvery = Duration(seconds: 1);
 
   void _presentUpdate() {
+    final target = _dispatcher;
+    if (target == null) return;
     final now = DateTime.now();
     final last = _lastPresentedAt;
     if (last != null && now.difference(last) < _presentEvery) return;
-    _present(_Present.update);
+    _lastPresentedAt = now;
+    target.update(_last);
   }
 
-  /// Queues one call to the presenter. Calls never overlap and keep their order;
-  /// a failure is reported, never rethrown into the recording.
-  void _present(_Present event) {
-    final target = presenter;
+  void _present(PresenterEvent event) {
+    final target = _dispatcher;
     if (target == null) return;
-    final snapshot = _last;
     _lastPresentedAt = DateTime.now();
-    _presenterQueue = _presenterQueue.then((_) async {
-      try {
-        switch (event) {
-          case _Present.start:
-            await target.onStart(snapshot);
-          case _Present.update:
-            await target.onUpdate(snapshot);
-          case _Present.pause:
-            await target.onPause(snapshot);
-          case _Present.resume:
-            await target.onResume(snapshot);
-          case _Present.finish:
-            await target.onFinish(snapshot);
-        }
-      } on Object catch (error, stack) {
-        final handler = onPresenterError;
-        if (handler != null) {
-          handler(error, stack);
-        } else {
-          developer.log(
-            'presenter ${event.name} failed',
-            name: 'flutter_tracking_gps',
-            error: error,
-            stackTrace: stack,
-          );
-        }
-      }
-    });
+    target.lifecycle(event, _last);
   }
 
   String _requireOpen(RecordingState expected) {
@@ -314,5 +345,3 @@ class TrackingSession {
     }
   }
 }
-
-enum _Present { start, update, pause, resume, finish }

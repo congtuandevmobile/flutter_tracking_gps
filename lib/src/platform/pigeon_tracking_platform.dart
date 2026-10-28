@@ -58,7 +58,6 @@ class PigeonTrackingPlatform implements TrackingPlatform {
     required String notificationText,
     required bool stepsEnabled,
     required int initialSteps,
-    required AndroidForegroundMode foregroundMode,
   }) async => _snapshot(
     await _api.start(
       _startConfig(
@@ -74,7 +73,6 @@ class PigeonTrackingPlatform implements TrackingPlatform {
         notificationText: notificationText,
         stepsEnabled: stepsEnabled,
         initialSteps: initialSteps,
-        foregroundMode: foregroundMode,
       ),
     ),
   );
@@ -104,7 +102,6 @@ class PigeonTrackingPlatform implements TrackingPlatform {
         notificationText: '',
         stepsEnabled: stepsEnabled,
         initialSteps: initialSteps,
-        foregroundMode: AndroidForegroundMode.builtIn,
       ),
     ),
   );
@@ -141,6 +138,9 @@ class PigeonTrackingPlatform implements TrackingPlatform {
   @override
   Future<void> clearSession(String sessionId) => _api.clearSession(sessionId);
 
+  @override
+  Future<List<String>> listSessions() => _api.listSessions();
+
   static TrackingFix _toFix(NativeFix f) => TrackingFix(
     sessionId: f.sessionId,
     segmentId: f.segmentId,
@@ -172,7 +172,6 @@ class PigeonTrackingPlatform implements TrackingPlatform {
     required String notificationText,
     required bool stepsEnabled,
     required int initialSteps,
-    required AndroidForegroundMode foregroundMode,
   }) => StartConfig(
     sessionId: sessionId,
     startSeq: startSeq,
@@ -185,10 +184,6 @@ class PigeonTrackingPlatform implements TrackingPlatform {
     batterySaver: batterySaver,
     stepsEnabled: stepsEnabled,
     initialSteps: initialSteps,
-    foregroundMode: switch (foregroundMode) {
-      AndroidForegroundMode.builtIn => NativeForegroundMode.builtIn,
-      AndroidForegroundMode.external => NativeForegroundMode.external,
-    },
     engine: EngineConfig(
       maxAccuracyMeters: config.maxAccuracyMeters,
       maxFixAgeMs: config.maxFixAge.inMilliseconds,
@@ -200,7 +195,10 @@ class PigeonTrackingPlatform implements TrackingPlatform {
       maxBridgeMs: config.maxBridge.inMilliseconds,
       reanchorAfterRejects: config.reanchorAfterRejects,
       rejectMock: config.rejectMock,
-      pdrEnabled: config.pdrPolicy == PdrPolicy.confirmedByGps,
+      pdrEnabled: config.pdrPolicy != PdrPolicy.off,
+      pdrTrustedWhenCalibrated:
+          config.pdrPolicy == PdrPolicy.trustedWhenCalibrated,
+      recoveryStepEvidenceAfterMs: config.recoveryStepEvidenceAfter.inMilliseconds,
       pdrConfirmRatio: config.pdrConfirmRatio,
       kalman: config.smoothing == PositionSmoothing.kalman,
       stopRadiusMeters: config.stopRadiusMeters,
@@ -226,6 +224,7 @@ class PigeonTrackingPlatform implements TrackingPlatform {
       NativeTrackingState.idle => PlatformState.idle,
       NativeTrackingState.running => PlatformState.running,
       NativeTrackingState.paused => PlatformState.paused,
+      NativeTrackingState.finishing => PlatformState.finishing,
       NativeTrackingState.stopped => PlatformState.stopped,
       NativeTrackingState.permissionDenied => PlatformState.permissionDenied,
       NativeTrackingState.error => PlatformState.error,
@@ -238,7 +237,10 @@ class PigeonTrackingPlatform implements TrackingPlatform {
       NativeStepsStatus.active => StepsStatus.active,
       NativeStepsStatus.permissionDenied => StepsStatus.permissionDenied,
       NativeStepsStatus.unavailable => StepsStatus.unavailable,
+      NativeStepsStatus.failed => StepsStatus.failed,
     },
+    stepsFinal: s.stepsFinal,
+    journalPending: s.journalPending,
     error: s.error,
   );
 
@@ -263,5 +265,10 @@ class PigeonTrackingPlatform implements TrackingPlatform {
         : DateTime.fromMillisecondsSinceEpoch(d.lastAcceptedFixAtMs),
     steps: d.steps,
     strideMeters: _known(d.strideMeters),
+    activeTime: Duration(milliseconds: d.activeTimeMs),
+    bridgedGap: Duration(milliseconds: d.bridgedGapMs),
+    uncreditedGap: Duration(milliseconds: d.uncreditedGapMs),
+    uncreditedGaps: d.uncreditedGaps,
+    ambiguousSteps: d.ambiguousSteps,
   );
 }

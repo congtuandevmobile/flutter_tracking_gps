@@ -27,6 +27,11 @@ class FlutterTrackingGps {
   Future<PlatformPermission> requestStepsPermission() =>
       _platform.requestStepsPermission();
 
+  /// The ids of the sessions persisted on this device (for example after the
+  /// process was killed mid-recording): [TrackingSession.restore] one of them, or
+  /// clear it once it was saved.
+  Future<List<String>> listSessions() => _platform.listSessions();
+
   /// A recording. Create one per activity.
   ///
   /// [presenter] is where an app plugs in a Live Activity / ongoing notification
@@ -42,6 +47,7 @@ class FlutterTrackingGps {
     int initialSteps = 0,
     TrackingPresenter? presenter,
     void Function(Object error, StackTrace stack)? onPresenterError,
+    Duration presenterTimeout = const Duration(seconds: 5),
   }) => TrackingSession(
     platform: _platform,
     config: config,
@@ -53,5 +59,6 @@ class FlutterTrackingGps {
     initialSteps: initialSteps,
     presenter: presenter,
     onPresenterError: onPresenterError,
+    presenterTimeout: presenterTimeout,
   );
 }

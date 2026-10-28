@@ -21,6 +21,12 @@ enum PdrPolicy {
   /// when the returning GPS shows the phone did not travel, it counts as 0 m.
   /// This is what stops a phone shaken in the hand from becoming distance.
   confirmedByGps,
+
+  /// Like [confirmedByGps], but once the stride has been calibrated on good GPS
+  /// the estimate for a gap is credited as ESTIMATED distance even when the gap
+  /// is long or the route curves, bounded by the speed ceiling. Opt-in: a phone
+  /// shaken in the hand during a gap can then be credited.
+  trustedWhenCalibrated,
 }
 
 /// Every number here is a STARTING VALUE chosen by reasoning, not measured on
@@ -45,6 +51,7 @@ class TrackingConfig {
     this.updateInterval = const Duration(seconds: 1),
     this.minDistanceMeters = 0,
     this.initialStrideMeters,
+    this.recoveryStepEvidenceAfter = const Duration(seconds: 30),
   });
 
   /// Speed ceiling per sport (m/s). Running 10 and cycling 25 are the values
@@ -55,6 +62,9 @@ class TrackingConfig {
       TrackingSport.running || TrackingSport.walking => 10,
       TrackingSport.other => 12,
     },
+    pdrPolicy: sport == TrackingSport.cycling
+        ? PdrPolicy.off
+        : PdrPolicy.confirmedByGps,
   );
 
   /// A fix with a worse horizontal accuracy (or an unknown one) is DEGRADED:
@@ -112,4 +122,10 @@ class TrackingConfig {
   /// user's last recording). null = none: steps are not turned into a distance
   /// estimate until GPS has taught the engine a stride in this session.
   final double? initialStrideMeters;
+
+  /// With a working step sensor and a pedestrian policy, a GPS gap at least this
+  /// long in which the sensor measured NO steps is credited 0 m (the person was
+  /// standing). Shorter gaps are not judged: Android may deliver steps ~10 s
+  /// late. [Duration.zero] disables the rule.
+  final Duration recoveryStepEvidenceAfter;
 }

@@ -20,6 +20,15 @@ class TrackingSnapshot {
     this.steps = 0,
     this.strideMeters,
     this.stepsStatus = StepsStatus.off,
+    this.failureState = TrackingFailureState.none,
+    this.error,
+    this.stepsFinal = false,
+    this.journalPending = 0,
+    this.activeTime = Duration.zero,
+    this.bridgedGap = Duration.zero,
+    this.uncreditedGap = Duration.zero,
+    this.uncreditedGaps = 0,
+    this.ambiguousSteps = 0,
   });
 
   const TrackingSnapshot.idle()
@@ -39,7 +48,16 @@ class TrackingSnapshot {
       isStopped = false,
       steps = 0,
       strideMeters = null,
-      stepsStatus = StepsStatus.off;
+      stepsStatus = StepsStatus.off,
+      failureState = TrackingFailureState.none,
+      error = null,
+      stepsFinal = false,
+      journalPending = 0,
+      activeTime = Duration.zero,
+      bridgedGap = Duration.zero,
+      uncreditedGap = Duration.zero,
+      uncreditedGaps = 0,
+      ambiguousSteps = 0;
 
   final String? sessionId;
   final RecordingState state;
@@ -76,4 +94,37 @@ class TrackingSnapshot {
 
   /// State of the native step sensor (off unless `stepsEnabled` was asked for).
   final StepsStatus stepsStatus;
+
+  /// Check this before treating a running recording as operational.
+  final TrackingFailureState failureState;
+  final String? error;
+  bool get hasNativeFailure => failureState != TrackingFailureState.none;
+
+  /// True when the step total is final: after `finish`, the platform's exact
+  /// count was obtained (or there is no step sensor). False after a finish means
+  /// it is the live count (see [error] for why).
+  final bool stepsFinal;
+
+  /// Events the engine accepted that are NOT on disk yet. Zero means everything
+  /// shown here is durable; a crash while this is above zero can lose that many
+  /// of the latest events.
+  final int journalPending;
+
+  /// Everything this snapshot shows has reached the disk.
+  bool get isDurable => journalPending == 0;
+
+  /// Workout time: the running legs only, pauses excluded. The headline timer.
+  final Duration activeTime;
+
+  /// Time of GPS gaps that were credited (a bridge or an estimate).
+  final Duration bridgedGap;
+
+  /// Time of GPS gaps and unmeasured intervals (a weak start, a gap still open
+  /// at the end) that were NOT credited. Reported, never hidden: the distance
+  /// for this time is unknown, not zero.
+  final Duration uncreditedGap;
+  final int uncreditedGaps;
+
+  /// Steps measured in a batch that straddles a GPS-quality change: used for nothing.
+  final int ambiguousSteps;
 }

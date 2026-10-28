@@ -34,3 +34,5 @@ Walking slower than the stationary Doppler limit counts as standing, so such ste
 
 ## Used by / tested by
 `GpsDistanceEngine`. Dart twin: `lib/src/engine/stride_estimator.dart`. Tested by `StepsTest` (`StrideEstimatorTest`) and `test/engine/steps_test.dart`.
+
+`sampleCount` counts the windows that taught the stride in this session (reset by `reset()`); the trusted policy needs 3.

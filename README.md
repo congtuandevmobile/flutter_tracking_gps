@@ -6,10 +6,21 @@ a deterministic distance engine (shared Kotlin core, `tracking-core`) running
 natively decides what counts as distance; Dart sends commands and shows the
 snapshots.
 
-**Status: first version. The shared Kotlin core runs natively on both platforms
-(distance keeps being measured when the Flutter engine is gone); builds and
-unit tests pass; not tested on a device yet.** Read `docs/FLOW.md` for what happens in every
+**Status: 0.0.1-beta (first beta). The shared Kotlin core runs natively on both platforms
+(distance keeps being measured when the Flutter engine is gone); every input is
+journaled so a killed recording is restored exactly; builds and unit tests pass;
+not tested on a device yet.** Read `doc/FLOW.md` for what happens in every
 situation and what is not done.
+
+## Install
+
+```yaml
+dependencies:
+  flutter_tracking_gps: ^0.0.1-beta
+```
+
+Releases are tagged `v<version>` from `pubspec.yaml` (for example `v0.0.1-beta`,
+`v0.0.1-beta.1`, `v0.0.1-beta.2`); see `CHANGELOG.md`.
 
 ## Why
 
@@ -37,14 +48,18 @@ session.updates.listen((s) => print('${s.totalMeters} m, gps ${s.quality.name}')
 await session.start(sessionId: 'activity-123');
 await session.pause();
 await session.resume();               // new segment: nothing is bridged
-final result = await session.finish(); // final TrackingSnapshot
+final result = await session.finish(); // FINAL: journal durable, steps finalized
+print(result.activeTime);              // workout time, pauses excluded
+print(result.uncreditedGap);           // GPS time nothing was credited for (reported, not hidden)
 print(await session.report());         // coordinate-free timeline (from native)
+final route = await session.persistedFixes(); // the raw route, oldest first
 await session.clearPersisted();        // after the activity was saved
 ```
 
-After the process died: `await session.restore(sessionId: 'activity-123')`
-(native replays the persisted fixes; the session comes back paused and
-`resume()` continues it in a new segment).
+After the process died: `await gps.listSessions()` shows what is on the device and
+`await session.restore(sessionId: 'activity-123')` replays its journal with the
+configuration it ran with (distance, steps, stride and times come back exactly; the
+session is paused and `resume()` continues it in a new segment).
 
 ## Steps and live activity
 
@@ -52,15 +67,15 @@ After the process died: `await session.restore(sessionId: 'activity-123')`
 await gps.requestStepsPermission();            // Android 10+ / iOS Motion & Fitness
 final session = gps.createSession(
   stepsEnabled: true,                          // steps help while GPS is weak
-  presenter: MyLiveActivityPresenter(),        // optional, see docs/PRESENTER.md
+  presenter: MyLiveActivityPresenter(),        // optional, see doc/PRESENTER.md
 );
 ```
 
 Steps never become distance on their own: while GPS is weak they make a pending
-estimate that only counts as far as the GPS that returns confirms it. Without a
-presenter, Android shows the SDK's own plain foreground notification (text from
-`notificationText`, it keeps the recording alive); a third-party live activity plugs in through
-`TrackingPresenter`.
+estimate that only counts as far as the GPS that returns confirms it. The SDK always runs its own Android foreground service with a plain notification
+(text from `notificationText`; it keeps the recording alive). A third-party live
+activity plugs in through `TrackingPresenter` and only draws: it never decides
+whether the recording survives.
 
 ## Setup
 
@@ -77,7 +92,11 @@ lib/src/engine      Dart reference twin of the distance rules (pure, tested)
 tracking-core/      the shipped distance engine + algorithms (Kotlin Multiplatform)
 lib/src/api         TrackingSession, FlutterTrackingGps
 lib/src/platform    TrackingPlatform + Pigeon bridge
-android/ ios/       native engines (follow docs/NATIVE_RULES.md)
+android/ ios/       native engines (follow doc/NATIVE_RULES.md)
 pigeons/            the channel contract
 example/            a small recorder screen
 ```
+
+`finish()` returns a FINAL snapshot (`RecordingState.finished`); while it is being
+finalized the state is `finishing`. `snapshot.isDurable` says whether everything shown
+has reached the disk.

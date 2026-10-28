@@ -1,79 +1,115 @@
-## 0.1.0
+## v0.0.1-beta
 
-* **Steps in the engine (B + C).** Native sensors (Android `TYPE_STEP_COUNTER`, iOS
-  `CMPedometer`) feed the shared core. The core
-  owns the accounting (`StepSession`) and the metres (`StrideEstimator`): the stride
-  is learned from good GPS and, while GPS is weak, steps become a **pending**
-  estimate the returning GPS must confirm (same `GapReconciler`, one source per
-  gap). Opt in with `createSession(stepsEnabled: true)`; `initialStrideMeters`,
-  `initialSteps`, `snapshot.steps`, `strideMeters`, `stepsStatus`,
-  `requestStepsPermission()`. Dart reference twin and tests added.
-* **`TrackingPresenter`** hook for a third-party live activity / notification
-  (`createSession(presenter: ...)`, `docs/PRESENTER.md`). Android now has a default
-  foreground notification (plain text set from Flutter via `notificationTitle` /
-  `notificationText`, tap returns to the app; it keeps the process alive); a presenter
-  that owns a foreground service can replace it (`ownsAndroidForegroundService`).
-* Pigeon: `StartConfig.stepsEnabled/initialSteps/foregroundMode`,
-  `EngineConfig.initialStrideMeters`, `NativeDistance.steps/strideMeters`,
-  `NativeSnapshot.stepsStatus`, `stepsPermissionStatus`, `requestStepsPermission`.
-  `TrackingCoreBridge` takes `initialStrideMeters` and has `onStepCounter`,
-  `onSegmentSteps`, `correctClosedSegment`. Rebuild the iOS framework with
-  `tool/build_core.sh`.
-* iOS: `NSMotionUsageDescription` needed for steps; the pod links CoreMotion.
-  Android: manifest adds `ACTIVITY_RECOGNITION`.
-* Tests: 83 core, 15 Android engine, 15 iOS engine, 55 Dart. Not tested on a device.
+First beta. **Not tested on a physical device yet** (battery, background
+survival and OEM behaviour are unmeasured) and every threshold is an unmeasured
+starting value.
 
-## 0.0.3
+### Engine (shared Kotlin core, `tracking-core`)
 
-Audit fixes (each pinned by a test that failed before):
+* A deterministic distance engine decides what counts as distance from raw fixes
+  (position, Doppler speed, accuracy), not from a black-box odometer: it drops
+  stale, duplicate, mock, invalid and other-session/segment fixes, treats
+  inaccurate fixes as quality only, anchors on the first good fix, and rejects
+  jumps (against the latest healthy fix as well as the accounting anchor),
+  stationary readings and noise-radius drift. The total only grows.
+* A GPS gap is judged from the last healthy fix and credited **once** (the larger
+  of the straight line shrunk by its uncertainty and a step estimate the returning
+  GPS corroborates), never as a sum. Nothing is bridged across a pause or a
+  segment; a resume opens a new segment.
+* **Time:** `activeTime` excludes pauses; `movingTime` and `uncreditedGap` are parts
+  OF it (not added on top). `movingTime` includes credited gaps crossed at moving
+  speed, and `uncreditedGap` / `uncreditedGaps` report the time whose distance is
+  unknown, because nothing was credited for it (a weak start, a gap beyond `maxBridge`, a gap with no steps, a
+  gap open at finish). The distance for that time is unknown, not zero, and is
+  never hidden.
+* **Standing still:** Doppler below the limit, then the displacement speed when no
+  Doppler is usable, then a stay-radius gate once stopped (the anchor stays put so
+  real movement is credited in full when it leaves the radius).
+* **Steps.** `StepSession` (baseline, segments, counter reset) and `StrideEstimator`
+  (metres per step learned from good GPS). A step batch is judged by the interval
+  it was MEASURED in against a timeline of GPS quality: wholly good teaches the
+  stride, wholly weak becomes a pending estimate the returning GPS must confirm, a
+  batch straddling a quality change is `ambiguousSteps` (kept in the step total and the
+  journal, but not used for the stride or a pending estimate). A long
+  gap with a working sensor and no steps credits 0 m. Opt-in
+  `PdrPolicy.trustedWhenCalibrated` credits a calibrated estimate as ESTIMATED
+  distance even for a long or curved gap.
+* **Journal.** `SessionRecorder` writes every input (header with the configuration,
+  lifecycle, fixes with their arrival time, step readings, the tick that detected
+  silence) to a CRC-per-line journal BEFORE applying it. The engine is a pure
+  function of it, so replaying reproduces the live result exactly. The header also
+  stores the engine version: a journal of other rules is replayed but flagged
+  (`ENGINE_CHANGED`), and `reprocess` recomputes with the current rules without
+  writing. A restored session is paused at its LAST journaled event, so the time the
+  process was dead is never workout time and a reboot cannot make a leg negative.
+  See `doc/JOURNAL.md`.
+* Runs on a monotonic clock (Android `elapsedRealtime`, iOS `CLOCK_MONOTONIC`).
+* Algorithms: Kalman2D (quality gate only), LowPassFilter, OutlierRejector,
+  DouglasPeucker, StopDetector, AdaptiveSamplingPolicy, GapReconciler, plus offline
+  Dbscan, KMeans, RoadGraph and HmmMapMatcher. The Dart engine is a reference twin
+  of the distance rules; 11 shared CSV fixtures run on both.
 
-* **A GPS gap is decided from the last healthy fix, not from the accounting
-  anchor.** After 10 s of standing the next movement was treated as a recovery
-  and its first metres were lost.
-* The engine refuses a fix of another **session** (`WRONG_SESSION`), and invalid
-  numbers get `INVALID` instead of being read as "unknown".
-* A step estimate carries its **segment** (`submitPdr(segmentId, ...)`, also in
-  the Pigeon API); a late estimate of an old segment cannot leak into the next.
-* The core runs on a **monotonic clock** (Android `elapsedRealtime`, iOS
-  `CLOCK_MONOTONIC`); fixes carry `elapsedMs`. A wall-clock jump no longer ages
-  or reorders fixes.
-* The Kalman filter is a **quality gate only**: the distance is measured on raw
-  accepted fixes, and a silence reset is reported as a discontinuity.
-* `GeoMath` wraps longitude at +-180 and refuses the poles; all algorithms
-  validate their input; `GapReconciler` caps an estimate by the straight line.
-* The bridge uses written-out stable codes (no `enum.ordinal`); `-1.0` is
-  unknown, NaN is invalid; `speedAccuracy` is passed through (Doppler is only
-  trusted with an accuracy of at most 1.5 m/s, an unmeasured value).
-* `StopDetector` needs both a stay inside the radius and no motion; moving time
-  no longer counts fixes the Doppler calls still.
-* Native: a failure of the core on OS data is reported as `CORE_REJECTED`
-  instead of crashing the collector.
-* Tests: 59 core, 10 Android engine, 10 iOS engine, 37 Dart.
+### Native
 
-## 0.0.2
+* **Android:** Fused location in a foreground service (type `location`) that the SDK
+  ALWAYS runs, with a plain notification whose title/text come from Flutter and
+  whose tap returns to the app (a presenter can replace its content by posting with
+  the same notification id). `TYPE_STEP_COUNTER` (needs `ACTIVITY_RECOGNITION`;
+  recording works without it). Every callback carries a generation and a late one
+  is dropped; commands wait for the jobs they stop. `resume` after a process death
+  starts the service BEFORE recording continues and fails with
+  `FOREGROUND_START_FAILED` if the OS refuses.
+* **iOS:** CoreLocation with the `location` background mode; `CMPedometer` for steps
+  (needs `NSMotionUsageDescription`; a missing key, a denied permission, a runtime
+  error and a query timeout are reported with stable codes, never as "0 steps").
+  `finish` waits for the exact step count, identity-checked by (session, segment).
+* **Both:** one journal per session, ONE writer with a flush barrier, collision-safe
+  file names (a hash of the session id), atomic repair of a half-written last
+  record (damage in the MIDDLE keeps the original as `<file>.corrupt` first); restore replays the journal with the configuration stored in its header
+  and comes back paused; `listSessions`; clearing waits for the writer and is
+  refused while the session is open. Errors carry a stable code, a message and
+  details; none is swallowed.
 
-* The distance engine now runs **natively** through the shared Kotlin core
-  (`TrackingCoreBridge`): Android and iOS native engines feed it every fix and a
-  1 Hz tick and publish snapshots (distance, GPS quality, moving time, stopped)
-  over a new `streamSnapshots` channel. Distance keeps being measured when the
-  Flutter engine is gone.
-* New host API: `submitPdr`, `restoreSession` (replays persisted fixes, session
-  comes back paused), `getReport`. `StartConfig` carries an `EngineConfig`,
-  `adaptiveSampling` and `batterySaver`.
-* Adaptive sampling (Android: interval and displacement; iOS: displacement
-  filter); the silence limit follows the plan.
-* Dart: `TrackingSession` is now thin (commands + snapshot mapping);
-  `session.report()` is async; the Dart engine stays as a reference twin.
-* `tracking-core`: Kalman2D, LowPassFilter, OutlierRejector, DouglasPeucker,
-  StopDetector, AdaptiveSamplingPolicy, GapReconciler, plus offline auxiliary
-  algorithms (Dbscan, KMeans, RoadGraph with Dijkstra and A*, HmmMapMatcher).
-* Tests: 40 core, 9 Android engine, 10 iOS engine, 36 Dart.
+### Flutter API
 
-## 0.0.1
+* `FlutterTrackingGps`: location and steps permissions, `listSessions()`,
+  `createSession(...)`.
+* `TrackingSession`: `start`, `pause`, `resume` (new segment), `finish` (final:
+  journal durable, steps finalized, see `stepsFinal`), `restore`, `persistedFixes`,
+  `fixes`, `clearPersisted`, `report`, `updates`.
+* `TrackingSnapshot`: totals by source, `activeTime`, `movingTime`, `bridgedGap`,
+  `uncreditedGap`, `ambiguousSteps`, `steps`, `strideMeters`, `stepsStatus`,
+  `stepsFinal`, `failureState` / `error` / `hasNativeFailure` (a native failure no
+  longer hides behind the last commanded state). `lastFixAt` is calendar time.
+* `createSession(stepsEnabled: true)` opts into steps; `initialStrideMeters` and
+  `initialSteps` seed a returning user. `TrackingConfig.forSport(cycling)` turns
+  pedestrian estimates off.
+* `TrackingPresenter` hook for a third-party live activity or notification
+  (`createSession(presenter: ...)`, `doc/PRESENTER.md`). Delivery is bounded:
+  lifecycle events in order, `onUpdate` coalesced, a time limit per call,
+  contained errors, a `dispose` that cannot hang, and a hung call is NEVER
+  overlapped by another (a Dart future cannot be cancelled, so later events wait
+  until it ends).
+* `RecordingState.finishing` (finalizing, not final) before `finished`;
+  `journalPending` / `isDurable` say whether what is shown is on disk.
 
-* First version: native fix collection with persistence (iOS CoreLocation,
-  Android Fused location in a foreground service), Pigeon contract, and a
-  deterministic Dart distance engine (anchor, Doppler and noise gates, jump
-  rejection, gap bridging, pending step estimates confirmed by returning GPS,
-  segments never bridged, append-only ledger).
-* Not measured on devices; every threshold is a starting value.
+### Setup
+
+* iOS (minimum 14): `NSLocationWhenInUseUsageDescription`,
+  `UIBackgroundModes: [location]`, `NSMotionUsageDescription` for steps. Build the
+  shared core framework with `tool/build_core.sh`.
+* Android: nothing to add; the plugin manifest declares the permissions
+  (including `ACTIVITY_RECOGNITION`) and the service.
+
+### Known limits
+
+See `doc/FLOW.md` ("Not done yet"): no device pass, automatic restart after the OS
+kills the app, sampling accuracy not applied natively, a late step batch cannot
+join a gap already credited, a watch producer is designed for but not built.
+
+### Tests
+
+136 shared-core (incl. exact journal replay, reboot, engine version, reprocess, a
+ten-hour replay measured at ~0.2 s), 38 Android (29 engine, 9 file store, fakes for
+location, steps and journal), 30 iOS engine and 77 Dart tests pass; 11 CSV fixtures
+agree on both engines. No device test.

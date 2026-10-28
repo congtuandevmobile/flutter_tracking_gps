@@ -3,18 +3,16 @@
 **Path:** `ios/Classes/StepProviding.swift` · **Layer:** iOS native (sensor)
 
 ## Purpose
-Where step counts come from, as a protocol (like `LocationProviding`) so `TrackingEngine` can be tested with a fake. It only reads `CMPedometer`; the accounting is the shared core's (`StepSession`).
+Where step counts come from, as a protocol so `TrackingEngine` can be tested with a fake. It only reads `CMPedometer`; the accounting is the shared core's. Every failure is a typed `StepError` with a stable code and message and is NEVER collapsed into "0 steps".
+
+## `StepError`
+`permissionDenied` (`STEPS_PERMISSION_DENIED`), `unavailable` (`STEPS_UNAVAILABLE`), `missingUsageDescription` (`MISSING_MOTION_USAGE_DESCRIPTION`: `NSMotionUsageDescription` is missing, asking would crash), `timeout` (`STEPS_QUERY_TIMEOUT`: not the same as no steps) and `failed(message)` (`STEPS_FAILED`).
 
 ## `StepProviding`
-`status` (hardware + Motion & Fitness permission), `permission`, `requestPermission` (CoreMotion has no explicit request: the system prompt appears on the first query, so a tiny query is run), `startUpdates(from:handler:)` (live count since the segment start), `stopUpdates()`, `query(from:to:completion:)` (the OS's exact count for a range, nil on failure or after a 5 s timeout).
+`availability()` (hardware, the Info.plist key and the permission), `permission`, `requestPermission` (CoreMotion has no explicit request: a tiny query shows the prompt; without the usage key it refuses instead of crashing), `startUpdates(from:handler:)` (live `StepReading(count, endDate)` or a runtime `StepError`, never swallowed), `stopUpdates()`, `query(from:to:timeout:completion:)` (the OS's exact count, or `.timeout` / an error).
 
 ## `CoreMotionStepProvider`
-- `CMPedometer` can count from a chosen date, so no baseline is needed; at a boundary the OS gives the **exact** count of the closed segment.
-- A generation counter drops a reading queued before `stopUpdates()`, so it cannot reach a later segment.
-- `query` answers once (the OS answer and the timeout race, guarded by `Once`).
+`CMPedometer` can count from a chosen date, so no baseline is needed, and at a boundary the OS gives the exact count of the closed segment. A generation counter drops a reading queued before `stopUpdates()`. `query` answers once (the OS answer and the timeout race, guarded by `Once`). CoreMotion errors are mapped to `StepError`.
 
 ## Limits (not measured on devices)
-Starting the sensor with the permission `notDetermined` shows the system prompt. If the exact query fails or times out, the segment keeps its last live count (an under-count by the steps since that reading). Distance is never derived from the exact count.
-
-## Used by / tested by
-`TrackingEngine`. Tested through `RunnerTests` with `FakeSteps`.
+Starting the sensor with the permission `notDetermined` shows the system prompt. If the exact query fails or times out the engine keeps the live count and says so; distance is never derived from it.

@@ -1,36 +1,5 @@
 # RunnerTests.swift
 
-**Path:** `example/ios/RunnerTests/RunnerTests.swift` · **Layer:** tests (iOS, XCTest)
+Engine tests with a fake location provider, a fake step provider (with held and failing exact queries) and an in-memory journal store: lifecycle; the missing background mode error; permission denied; distance through the Kotlin core; fixes numbered, journaled and delivered; an invalid coordinate is not forwarded; pause/resume never bridge; a location measured before the new leg is ignored; a shaken phone adds nothing; adaptive sampling; restore replays the journal and comes back paused with the same result, using the header's configuration; a damaged last record is dropped and the journal repaired; nothing to restore fails; an open session cannot be cleared and sessions are listed; steps: weak-GPS steps become pending (not distance), steps off, a missing permission or Info.plist key only disable steps and say why, a runtime CoreMotion error is reported not swallowed, pause ends the subscription and the exact count corrects the total, resume starts a fresh count, `stop` WAITS for the exact count and returns a final snapshot with a durable journal, a failed exact query is not final and says why, finishing from pause still waits, and a late answer for an older session never touches the new one (identity).
 
-## Purpose
-Unit tests of the iOS `TrackingEngine` using protocol fakes for the location provider and the store. The Kotlin core is the **real** one (the `TrackingCore` framework), so the glue and the core are tested together without GPS, permission dialogs or disk.
-
-## Test doubles
-| Type | Description |
-|---|---|
-| `TestClock` | One controllable time: `mono` is the engine's monotonic clock, `wall` the wall clock the fix ages are measured against. |
-| `FakeProvider: LocationProviding` | Settable `permission` and `startError`; counts `starts` and `stops`; records `updateRequest` calls; `push(north:seconds:accuracy:speed:)` moves the test clock to that moment and sends a `CLLocation` (metres north of the origin) to the delegate: the fix is measured and arrives then. |
-| `MemoryStore: FixStoring` | In-memory store. |
-
-## Tests
-| Test | What it checks |
-|---|---|
-| `testStartPauseResumeStop` | The state machine; a resume opens segment 1. |
-| `testMissingBackgroundModeIsAnErrorWithCodeMessageDetails` | A missing background mode is a `PigeonError` with code `MISSING_BACKGROUND_MODE`, a message and details. |
-| `testFixesAreNumberedPersistedAndDelivered` | Fixes get sequence numbers 0, 1, are delivered to `fixObserver` and persisted. |
-| `testAnInvalidCoordinateIsNotForwarded` | A negative horizontal accuracy is dropped. |
-| `testPermissionDeniedStartsNothing` | Without permission the state is `permissionDenied` and updates are not started. |
-| `testFixesBecomeDistanceInTheSnapshotThroughTheKotlinCore` | A 3 m/s run gives about 30 m, quality good, 11 fixes. |
-| `testPauseKeepsTheTotalAndResumeNeverBridges` | The total survives a pause and a far fix after resume only anchors. |
-| `testRestoreRebuildsTheDistanceFromPersistedFixesAndComesBackPaused` | Replay of two segments is not joined; the session comes back paused. |
-| `testAShakenPhoneWithoutGpsAddsNothingAndTheReportExplainsWhy` | A step estimate while GPS is good is ignored; the report contains the timeline. |
-| `testAdaptiveSamplingChangesTheDisplacementFilterWhenStandingStill` | After a standstill the engine asks the provider for a different displacement filter. |
-
-## Run
-```
-cd example/ios
-xcodebuild test -workspace Runner.xcworkspace -scheme Runner \
-  -destination 'platform=iOS Simulator,id=<simulator id>' CODE_SIGNING_ALLOWED=NO
-```
-
-Added step tests with a `FakeSteps` provider: weak-GPS steps become a pending estimate (not distance), steps off by config never start the sensor, a missing motion permission only disables steps, pause ends the subscription and the exact OS count corrects the total (a later reading is ignored), resume starts a fresh count and keeps the total.
+Added: `stop` is `.finishing` (steps not final) until the exact count is in and the journal durable; the snapshot reports events not on disk; damage in the middle keeps a backup; a journal of another engine version is restored but flagged.

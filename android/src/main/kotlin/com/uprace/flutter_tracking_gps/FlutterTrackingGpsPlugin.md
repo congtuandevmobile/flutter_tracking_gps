@@ -39,3 +39,6 @@ Coroutines and Flow, no `!!`, resources released on detach, every error a `Flutt
 
 ## Steps and foreground mode (added)
 `stepsPermissionStatus()` / `requestStepsPermission()`: `ACTIVITY_RECOGNITION` (a runtime permission from Android 10; granted before). Request code 7422, separate pending callback from the location one. `start` starts `TrackingService` only for `NativeForegroundMode.BUILT_IN`; with `EXTERNAL` the app's presenter must hold a foreground service of type `location`.
+
+## Updated
+`start` always starts `TrackingService`. `resume` first starts it again from the notification text stored in the journal; if the OS refuses, recording does NOT continue: the session stays paused and the call fails with `FOREGROUND_START_FAILED`. New `listSessions()`. `NativeForegroundMode` no longer exists.

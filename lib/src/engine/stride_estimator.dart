@@ -39,6 +39,9 @@ class StrideEstimator {
   /// Metres per step; null until the first plausible window (or an initial value).
   double? strideMeters;
 
+  /// How many windows taught the stride in this session.
+  int sampleCount = 0;
+
   void addSteps(int steps) {
     if (steps <= 0) return;
     _windowSteps += steps;
@@ -62,6 +65,7 @@ class StrideEstimator {
   void reset() {
     breakWindow();
     strideMeters = _initial;
+    sampleCount = 0;
   }
 
   void _flushIfReady() {
@@ -72,6 +76,7 @@ class StrideEstimator {
         strideMeters = current == null
             ? sample
             : current + alpha * (sample - current);
+        sampleCount++;
       }
       breakWindow();
     } else if (_windowSteps >= abandonSteps && _windowMeters < minMeters) {

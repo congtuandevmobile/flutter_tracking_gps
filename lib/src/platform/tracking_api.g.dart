@@ -112,6 +112,9 @@ enum NativeTrackingState {
   idle,
   running,
   paused,
+  /// `stop` was asked and is being finalized (live data closed, the exact step
+  /// count requested, the journal flushed). Not final yet: wait for [stopped].
+  finishing,
   stopped,
   /// Location permission is missing, so no fix can arrive.
   permissionDenied,
@@ -129,16 +132,8 @@ enum NativeStepsStatus {
   permissionDenied,
   /// The device has no step sensor.
   unavailable,
-}
-
-/// Who keeps the Android process alive while recording.
-enum NativeForegroundMode {
-  /// The SDK runs its own foreground service with a default notification
-  /// (distance and a chronometer). Survives the Flutter engine.
-  builtIn,
-  /// A third-party presenter (for example a live-activity plugin) owns a
-  /// foreground service. The SDK starts none. Ignored on iOS.
-  external,
+  /// The sensor reported a runtime error (see `NativeSnapshot.error`).
+  failed,
 }
 
 enum NativeGpsQuality {
@@ -295,6 +290,8 @@ class EngineConfig {
     required this.stopRadiusMeters,
     required this.stopMinDwellMs,
     required this.initialStrideMeters,
+    required this.pdrTrustedWhenCalibrated,
+    required this.recoveryStepEvidenceAfterMs,
   });
 
   double maxAccuracyMeters;
@@ -333,6 +330,14 @@ class EngineConfig {
   /// step count is not turned into a distance estimate until GPS taught one.
   double initialStrideMeters;
 
+  /// Credit a calibrated step estimate for a long or curved gap as ESTIMATED
+  /// distance (opt-in). See `PdrPolicy.trustedWhenCalibrated`.
+  bool pdrTrustedWhenCalibrated;
+
+  /// A GPS gap at least this long in which the step sensor measured no steps is
+  /// credited 0 m; zero or negative disables the rule.
+  int recoveryStepEvidenceAfterMs;
+
   List<Object?> _toList() {
     return <Object?>[
       maxAccuracyMeters,
@@ -351,6 +356,8 @@ class EngineConfig {
       stopRadiusMeters,
       stopMinDwellMs,
       initialStrideMeters,
+      pdrTrustedWhenCalibrated,
+      recoveryStepEvidenceAfterMs,
     ];
   }
 
@@ -376,6 +383,8 @@ class EngineConfig {
       stopRadiusMeters: result[13]! as double,
       stopMinDwellMs: result[14]! as int,
       initialStrideMeters: result[15]! as double,
+      pdrTrustedWhenCalibrated: result[16]! as bool,
+      recoveryStepEvidenceAfterMs: result[17]! as int,
     );
   }
 
@@ -388,7 +397,7 @@ class EngineConfig {
     if (identical(this, other)) {
       return true;
     }
-    return _deepEquals(maxAccuracyMeters, other.maxAccuracyMeters) && _deepEquals(maxFixAgeMs, other.maxFixAgeMs) && _deepEquals(silenceAfterMs, other.silenceAfterMs) && _deepEquals(maxSpeedMps, other.maxSpeedMps) && _deepEquals(minStepMeters, other.minStepMeters) && _deepEquals(accuracyNoiseFactor, other.accuracyNoiseFactor) && _deepEquals(stationarySpeedMps, other.stationarySpeedMps) && _deepEquals(maxBridgeMs, other.maxBridgeMs) && _deepEquals(reanchorAfterRejects, other.reanchorAfterRejects) && _deepEquals(rejectMock, other.rejectMock) && _deepEquals(pdrEnabled, other.pdrEnabled) && _deepEquals(pdrConfirmRatio, other.pdrConfirmRatio) && _deepEquals(kalman, other.kalman) && _deepEquals(stopRadiusMeters, other.stopRadiusMeters) && _deepEquals(stopMinDwellMs, other.stopMinDwellMs) && _deepEquals(initialStrideMeters, other.initialStrideMeters);
+    return _deepEquals(maxAccuracyMeters, other.maxAccuracyMeters) && _deepEquals(maxFixAgeMs, other.maxFixAgeMs) && _deepEquals(silenceAfterMs, other.silenceAfterMs) && _deepEquals(maxSpeedMps, other.maxSpeedMps) && _deepEquals(minStepMeters, other.minStepMeters) && _deepEquals(accuracyNoiseFactor, other.accuracyNoiseFactor) && _deepEquals(stationarySpeedMps, other.stationarySpeedMps) && _deepEquals(maxBridgeMs, other.maxBridgeMs) && _deepEquals(reanchorAfterRejects, other.reanchorAfterRejects) && _deepEquals(rejectMock, other.rejectMock) && _deepEquals(pdrEnabled, other.pdrEnabled) && _deepEquals(pdrConfirmRatio, other.pdrConfirmRatio) && _deepEquals(kalman, other.kalman) && _deepEquals(stopRadiusMeters, other.stopRadiusMeters) && _deepEquals(stopMinDwellMs, other.stopMinDwellMs) && _deepEquals(initialStrideMeters, other.initialStrideMeters) && _deepEquals(pdrTrustedWhenCalibrated, other.pdrTrustedWhenCalibrated) && _deepEquals(recoveryStepEvidenceAfterMs, other.recoveryStepEvidenceAfterMs);
   }
 
   @override
@@ -400,7 +409,6 @@ class StartConfig {
   StartConfig({
     required this.stepsEnabled,
     required this.initialSteps,
-    required this.foregroundMode,
     required this.engine,
     required this.adaptiveSampling,
     required this.batterySaver,
@@ -422,9 +430,6 @@ class StartConfig {
   /// Session steps to restore after a process death (the device counter is never
   /// added to it); 0 for a new session.
   int initialSteps;
-
-  /// Android only: who holds the foreground service (see [NativeForegroundMode]).
-  NativeForegroundMode foregroundMode;
 
   /// How the native engine measures distance.
   EngineConfig engine;
@@ -463,7 +468,6 @@ class StartConfig {
     return <Object?>[
       stepsEnabled,
       initialSteps,
-      foregroundMode,
       engine,
       adaptiveSampling,
       batterySaver,
@@ -485,17 +489,16 @@ class StartConfig {
     return StartConfig(
       stepsEnabled: result[0]! as bool,
       initialSteps: result[1]! as int,
-      foregroundMode: result[2]! as NativeForegroundMode,
-      engine: result[3]! as EngineConfig,
-      adaptiveSampling: result[4]! as bool,
-      batterySaver: result[5]! as bool,
-      sessionId: result[6]! as String,
-      startSeq: result[7]! as int,
-      startSegmentId: result[8]! as int,
-      intervalMs: result[9]! as int,
-      minDistanceMeters: result[10]! as double,
-      notificationTitle: result[11]! as String,
-      notificationText: result[12]! as String,
+      engine: result[2]! as EngineConfig,
+      adaptiveSampling: result[3]! as bool,
+      batterySaver: result[4]! as bool,
+      sessionId: result[5]! as String,
+      startSeq: result[6]! as int,
+      startSegmentId: result[7]! as int,
+      intervalMs: result[8]! as int,
+      minDistanceMeters: result[9]! as double,
+      notificationTitle: result[10]! as String,
+      notificationText: result[11]! as String,
     );
   }
 
@@ -508,7 +511,7 @@ class StartConfig {
     if (identical(this, other)) {
       return true;
     }
-    return _deepEquals(stepsEnabled, other.stepsEnabled) && _deepEquals(initialSteps, other.initialSteps) && _deepEquals(foregroundMode, other.foregroundMode) && _deepEquals(engine, other.engine) && _deepEquals(adaptiveSampling, other.adaptiveSampling) && _deepEquals(batterySaver, other.batterySaver) && _deepEquals(sessionId, other.sessionId) && _deepEquals(startSeq, other.startSeq) && _deepEquals(startSegmentId, other.startSegmentId) && _deepEquals(intervalMs, other.intervalMs) && _deepEquals(minDistanceMeters, other.minDistanceMeters) && _deepEquals(notificationTitle, other.notificationTitle) && _deepEquals(notificationText, other.notificationText);
+    return _deepEquals(stepsEnabled, other.stepsEnabled) && _deepEquals(initialSteps, other.initialSteps) && _deepEquals(engine, other.engine) && _deepEquals(adaptiveSampling, other.adaptiveSampling) && _deepEquals(batterySaver, other.batterySaver) && _deepEquals(sessionId, other.sessionId) && _deepEquals(startSeq, other.startSeq) && _deepEquals(startSegmentId, other.startSegmentId) && _deepEquals(intervalMs, other.intervalMs) && _deepEquals(minDistanceMeters, other.minDistanceMeters) && _deepEquals(notificationTitle, other.notificationTitle) && _deepEquals(notificationText, other.notificationText);
   }
 
   @override
@@ -531,6 +534,11 @@ class NativeDistance {
     required this.lastAcceptedFixAtMs,
     required this.steps,
     required this.strideMeters,
+    required this.activeTimeMs,
+    required this.bridgedGapMs,
+    required this.uncreditedGapMs,
+    required this.uncreditedGaps,
+    required this.ambiguousSteps,
   });
 
   NativeGpsQuality quality;
@@ -554,7 +562,8 @@ class NativeDistance {
   /// Doppler speed of the latest accepted fix; negative = unknown.
   double speedMps;
 
-  /// Measurement time of the latest accepted fix; negative = none yet.
+  /// Wall-clock time (epoch ms) of the latest accepted fix; negative = none yet.
+  /// Estimated from the monotonic measurement time at snapshot time.
   int lastAcceptedFixAtMs;
 
   /// Accepted steps of the session (zero without a step sensor).
@@ -562,6 +571,21 @@ class NativeDistance {
 
   /// Learned or configured metres per step; negative = unknown.
   double strideMeters;
+
+  /// Workout time: the running legs only, pauses excluded.
+  int activeTimeMs;
+
+  /// Time of GPS gaps that were credited (bridge or estimate).
+  int bridgedGapMs;
+
+  /// Time of GPS gaps and unmeasured intervals that were NOT credited: reported,
+  /// never hidden.
+  int uncreditedGapMs;
+
+  int uncreditedGaps;
+
+  /// Steps measured in a batch that straddles a GPS-quality change: used for nothing.
+  int ambiguousSteps;
 
   List<Object?> _toList() {
     return <Object?>[
@@ -577,6 +601,11 @@ class NativeDistance {
       lastAcceptedFixAtMs,
       steps,
       strideMeters,
+      activeTimeMs,
+      bridgedGapMs,
+      uncreditedGapMs,
+      uncreditedGaps,
+      ambiguousSteps,
     ];
   }
 
@@ -598,6 +627,11 @@ class NativeDistance {
       lastAcceptedFixAtMs: result[9]! as int,
       steps: result[10]! as int,
       strideMeters: result[11]! as double,
+      activeTimeMs: result[12]! as int,
+      bridgedGapMs: result[13]! as int,
+      uncreditedGapMs: result[14]! as int,
+      uncreditedGaps: result[15]! as int,
+      ambiguousSteps: result[16]! as int,
     );
   }
 
@@ -610,7 +644,7 @@ class NativeDistance {
     if (identical(this, other)) {
       return true;
     }
-    return _deepEquals(quality, other.quality) && _deepEquals(totalMeters, other.totalMeters) && _deepEquals(gpsMeters, other.gpsMeters) && _deepEquals(gapBridgeMeters, other.gapBridgeMeters) && _deepEquals(pdrMeters, other.pdrMeters) && _deepEquals(pendingPdrMeters, other.pendingPdrMeters) && _deepEquals(movingTimeMs, other.movingTimeMs) && _deepEquals(isStopped, other.isStopped) && _deepEquals(speedMps, other.speedMps) && _deepEquals(lastAcceptedFixAtMs, other.lastAcceptedFixAtMs) && _deepEquals(steps, other.steps) && _deepEquals(strideMeters, other.strideMeters);
+    return _deepEquals(quality, other.quality) && _deepEquals(totalMeters, other.totalMeters) && _deepEquals(gpsMeters, other.gpsMeters) && _deepEquals(gapBridgeMeters, other.gapBridgeMeters) && _deepEquals(pdrMeters, other.pdrMeters) && _deepEquals(pendingPdrMeters, other.pendingPdrMeters) && _deepEquals(movingTimeMs, other.movingTimeMs) && _deepEquals(isStopped, other.isStopped) && _deepEquals(speedMps, other.speedMps) && _deepEquals(lastAcceptedFixAtMs, other.lastAcceptedFixAtMs) && _deepEquals(steps, other.steps) && _deepEquals(strideMeters, other.strideMeters) && _deepEquals(activeTimeMs, other.activeTimeMs) && _deepEquals(bridgedGapMs, other.bridgedGapMs) && _deepEquals(uncreditedGapMs, other.uncreditedGapMs) && _deepEquals(uncreditedGaps, other.uncreditedGaps) && _deepEquals(ambiguousSteps, other.ambiguousSteps);
   }
 
   @override
@@ -621,6 +655,8 @@ class NativeDistance {
 class NativeSnapshot {
   NativeSnapshot({
     required this.stepsStatus,
+    required this.journalPending,
+    required this.stepsFinal,
     this.sessionId,
     required this.state,
     required this.segmentId,
@@ -633,6 +669,16 @@ class NativeSnapshot {
 
   /// State of the native step sensor.
   NativeStepsStatus stepsStatus;
+
+  /// Events accepted by the engine that are NOT on disk yet (queued for the
+  /// journal writer). Zero means everything shown here is durable; a crash while
+  /// this is above zero can lose that many of the latest events.
+  int journalPending;
+
+  /// True when the step total is final: after `stop`, the platform's exact count
+  /// for the closed segment was obtained (or there is no step sensor). False
+  /// means the total is the live count, which may still be corrected.
+  bool stepsFinal;
 
   String? sessionId;
 
@@ -655,6 +701,8 @@ class NativeSnapshot {
   List<Object?> _toList() {
     return <Object?>[
       stepsStatus,
+      journalPending,
+      stepsFinal,
       sessionId,
       state,
       segmentId,
@@ -673,14 +721,16 @@ class NativeSnapshot {
     result as List<Object?>;
     return NativeSnapshot(
       stepsStatus: result[0]! as NativeStepsStatus,
-      sessionId: result[1] as String?,
-      state: result[2]! as NativeTrackingState,
-      segmentId: result[3]! as int,
-      distance: result[4]! as NativeDistance,
-      fixCount: result[5]! as int,
-      lastFixTimeMs: result[6] as int?,
-      updatedAtMs: result[7]! as int,
-      error: result[8] as String?,
+      journalPending: result[1]! as int,
+      stepsFinal: result[2]! as bool,
+      sessionId: result[3] as String?,
+      state: result[4]! as NativeTrackingState,
+      segmentId: result[5]! as int,
+      distance: result[6]! as NativeDistance,
+      fixCount: result[7]! as int,
+      lastFixTimeMs: result[8] as int?,
+      updatedAtMs: result[9]! as int,
+      error: result[10] as String?,
     );
   }
 
@@ -693,7 +743,7 @@ class NativeSnapshot {
     if (identical(this, other)) {
       return true;
     }
-    return _deepEquals(stepsStatus, other.stepsStatus) && _deepEquals(sessionId, other.sessionId) && _deepEquals(state, other.state) && _deepEquals(segmentId, other.segmentId) && _deepEquals(distance, other.distance) && _deepEquals(fixCount, other.fixCount) && _deepEquals(lastFixTimeMs, other.lastFixTimeMs) && _deepEquals(updatedAtMs, other.updatedAtMs) && _deepEquals(error, other.error);
+    return _deepEquals(stepsStatus, other.stepsStatus) && _deepEquals(journalPending, other.journalPending) && _deepEquals(stepsFinal, other.stepsFinal) && _deepEquals(sessionId, other.sessionId) && _deepEquals(state, other.state) && _deepEquals(segmentId, other.segmentId) && _deepEquals(distance, other.distance) && _deepEquals(fixCount, other.fixCount) && _deepEquals(lastFixTimeMs, other.lastFixTimeMs) && _deepEquals(updatedAtMs, other.updatedAtMs) && _deepEquals(error, other.error);
   }
 
   @override
@@ -718,26 +768,23 @@ class _PigeonCodec extends StandardMessageCodec {
     }    else if (value is NativeStepsStatus) {
       buffer.putUint8(131);
       writeValue(buffer, value.index);
-    }    else if (value is NativeForegroundMode) {
+    }    else if (value is NativeGpsQuality) {
       buffer.putUint8(132);
       writeValue(buffer, value.index);
-    }    else if (value is NativeGpsQuality) {
-      buffer.putUint8(133);
-      writeValue(buffer, value.index);
     }    else if (value is NativeFix) {
-      buffer.putUint8(134);
+      buffer.putUint8(133);
       writeValue(buffer, value.encode());
     }    else if (value is EngineConfig) {
-      buffer.putUint8(135);
+      buffer.putUint8(134);
       writeValue(buffer, value.encode());
     }    else if (value is StartConfig) {
-      buffer.putUint8(136);
+      buffer.putUint8(135);
       writeValue(buffer, value.encode());
     }    else if (value is NativeDistance) {
-      buffer.putUint8(137);
+      buffer.putUint8(136);
       writeValue(buffer, value.encode());
     }    else if (value is NativeSnapshot) {
-      buffer.putUint8(138);
+      buffer.putUint8(137);
       writeValue(buffer, value.encode());
     } else {
       super.writeValue(buffer, value);
@@ -758,19 +805,16 @@ class _PigeonCodec extends StandardMessageCodec {
         return value == null ? null : NativeStepsStatus.values[value];
       case 132:
         final value = readValue(buffer) as int?;
-        return value == null ? null : NativeForegroundMode.values[value];
-      case 133:
-        final value = readValue(buffer) as int?;
         return value == null ? null : NativeGpsQuality.values[value];
-      case 134:
+      case 133:
         return NativeFix.decode(readValue(buffer)!);
-      case 135:
+      case 134:
         return EngineConfig.decode(readValue(buffer)!);
-      case 136:
+      case 135:
         return StartConfig.decode(readValue(buffer)!);
-      case 137:
+      case 136:
         return NativeDistance.decode(readValue(buffer)!);
-      case 138:
+      case 137:
         return NativeSnapshot.decode(readValue(buffer)!);
       default:
         return super.readValueOfType(type, buffer);
@@ -1063,7 +1107,8 @@ class TrackingHostApi {
     return (pigeonVar_replyValue! as List<Object?>).cast<NativeFix>();
   }
 
-  /// Deletes the persisted fixes of [sessionId] (they hold coordinates).
+  /// Deletes the persisted journal of [sessionId] (it holds coordinates). Waits for
+  /// the writer first, so nothing re-creates the file afterwards.
   Future<void> clearSession(String sessionId) async {
     final pigeonVar_channelName = 'dev.flutter.pigeon.flutter_tracking_gps.TrackingHostApi.clearSession$pigeonVar_messageChannelSuffix';
     final pigeonVar_channel = BasicMessageChannel<Object?>(
@@ -1080,6 +1125,26 @@ class TrackingHostApi {
         isNullValid: true,
     )
     ;
+  }
+
+  /// The ids of the sessions persisted on this device (for recovery after a kill).
+  Future<List<String>> listSessions() async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.flutter_tracking_gps.TrackingHostApi.listSessions$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(null);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+
+    final Object? pigeonVar_replyValue = _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: false,
+    )
+    ;
+    return (pigeonVar_replyValue! as List<Object?>).cast<String>();
   }
 }
 

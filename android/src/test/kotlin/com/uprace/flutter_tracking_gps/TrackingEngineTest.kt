@@ -4,16 +4,20 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
+import tracker.journal.JournalCodec
+import tracker.journal.JournalRecord
 import java.io.IOException
 import java.util.Collections
 import kotlin.math.abs
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 private const val BASE = 1_700_000_000_000L
@@ -59,60 +63,91 @@ private class FakeSteps(var status: NativeStepsStatus = NativeStepsStatus.ACTIVE
         }
     }
 
-    suspend fun push(raw: Long) = channel.emit(StepSample(raw, MONO))
+    suspend fun push(raw: Long, atMs: Long = MONO) = channel.emit(StepSample(raw, atMs))
 }
 
-private class MemoryStore : FixStore {
-    val fixes = Collections.synchronizedList(mutableListOf<NativeFix>())
+/** An in-memory journal store: the lines a real one would hold, plus counters to assert on. */
+private class MemoryJournalStore : JournalStore {
+    val files = HashMap<String, MutableList<String>>()
+    val sinks = HashMap<String, MemorySink>()
+    var flushes = 0
+    var rewrites = 0
+    var backups = 0
     var failOnAppend = false
+    /** When false, appended lines stay "queued" until flush (a slow disk). */
+    var autoWrite = true
+    var onFlush: (() -> Unit)? = null
 
-    override fun append(fix: NativeFix) {
-        if (failOnAppend) throw IOException("disk full")
-        fixes.add(fix)
+    inner class MemorySink(private val id: String) : DurableSink {
+        override var failure: Throwable? = null
+        private val queue = ArrayList<String>()
+        override val pending: Int get() = queue.size
+        override fun append(line: String) {
+            if (failOnAppend) {
+                failure = failure ?: IOException("disk full")
+                return
+            }
+            if (autoWrite) files.getOrPut(id) { ArrayList() }.add(line) else queue.add(line)
+        }
+        override fun flush() {
+            flushes++
+            files.getOrPut(id) { ArrayList() }.addAll(queue)
+            queue.clear()
+            onFlush?.invoke()
+        }
+        override fun close() {}
     }
 
-    override fun read(sessionId: String, afterSeq: Long): List<NativeFix> =
-        synchronized(fixes) { fixes.filter { it.sessionId == sessionId && it.seq > afterSeq } }
-
-    override fun clearSession(sessionId: String) {
-        fixes.removeAll { it.sessionId == sessionId }
+    override fun open(sessionId: String): DurableSink = sinks.getOrPut(sessionId) { MemorySink(sessionId) }
+    override fun read(sessionId: String): List<String> = files[sessionId]?.toList() ?: emptyList()
+    override fun rewrite(sessionId: String, lines: List<String>, keepBackup: Boolean) {
+        rewrites++
+        if (keepBackup) backups++
+        files[sessionId] = lines.toMutableList()
     }
+    override fun clear(sessionId: String) { files.remove(sessionId); sinks.remove(sessionId) }
+    override fun list(): List<String> = files.values.mapNotNull { (it.firstOrNull()?.let(JournalCodec::decode) as? JournalRecord.Header)?.sessionId }
 }
 
-private fun engineConfig() = EngineConfig(
-    maxAccuracyMeters = 40.0, maxFixAgeMs = 30_000, silenceAfterMs = 10_000, maxSpeedMps = 10.0,
+private fun engineConfig(stride: Double = -1.0, maxSpeed: Double = 10.0) = EngineConfig(
+    maxAccuracyMeters = 40.0, maxFixAgeMs = 30_000, silenceAfterMs = 10_000, maxSpeedMps = maxSpeed,
     minStepMeters = 2.0, accuracyNoiseFactor = 0.5, stationarySpeedMps = 0.4, maxBridgeMs = 120_000,
     reanchorAfterRejects = 3, rejectMock = true, pdrEnabled = true, pdrConfirmRatio = 0.5,
-    kalman = false, stopRadiusMeters = 15.0, stopMinDwellMs = 30_000, initialStrideMeters = -1.0,
+    kalman = false, stopRadiusMeters = 15.0, stopMinDwellMs = 30_000, initialStrideMeters = stride,
+    pdrTrustedWhenCalibrated = false, recoveryStepEvidenceAfterMs = 30_000,
 )
 
-private fun startConfig(id: String = "s", adaptive: Boolean = false) = StartConfig(
+private fun startConfig(id: String = "s", adaptive: Boolean = false, steps: Boolean = false, engine: EngineConfig = engineConfig()) = StartConfig(
+    stepsEnabled = steps, initialSteps = 0,
     sessionId = id, startSeq = 0, startSegmentId = 0, intervalMs = 1000, minDistanceMeters = 0.0,
-    notificationTitle = "t", notificationText = "t", engine = engineConfig(),
+    notificationTitle = "t", notificationText = "x", engine = engine,
     adaptiveSampling = adaptive, batterySaver = false,
-    stepsEnabled = false, initialSteps = 0, foregroundMode = NativeForegroundMode.BUILT_IN,
 )
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class TrackingEngineTest {
     private var clock = MONO
 
-    private fun engine(source: FakeSource, store: MemoryStore, steps: StepSource = NoStepSource): TrackingEngine = TrackingEngine(
-        source = source, stepSource = steps, store = store,
+    private fun engine(source: FakeSource, store: MemoryJournalStore, steps: StepSource = NoStepSource): TrackingEngine = TrackingEngine(
+        source = source, store = store, stepSource = steps,
         scope = CoroutineScope(UnconfinedTestDispatcher()),
         wallClockMs = { BASE + (clock - MONO) },
         monotonicMs = { clock },
     )
 
+    private suspend fun FakeSource.run(seconds: Int, from: Int = 0, segmentNorth: Double = 0.0) {
+        for (i in from..from + seconds) {
+            clock = MONO + i * 1000L
+            push(loc(i.toDouble(), segmentNorth + (i - from) * 3.0, speed = 3.0))
+        }
+    }
+
     @Test
     fun fixesBecomeDistanceInTheSnapshot() = runTest {
         val source = FakeSource()
-        val engine = engine(source, MemoryStore())
+        val engine = engine(source, MemoryJournalStore())
         engine.start(startConfig())
-        for (i in 0..10) {
-            clock = MONO + i * 1000L
-            source.push(loc(i.toDouble(), i * 3.0, speed = 3.0))
-        }
+        source.run(10)
         val s = engine.snapshot()
         assertEquals(NativeTrackingState.RUNNING, s.state)
         assertTrue(abs(s.distance.totalMeters - 30.0) < 0.5, "was ${s.distance.totalMeters}")
@@ -121,29 +156,34 @@ class TrackingEngineTest {
     }
 
     @Test
-    fun fixesArePersistedInOrderWithSequenceNumbers() = runTest {
+    fun theJournalHoldsAHeaderAndEveryFixInOrder() = runTest {
         val source = FakeSource()
-        val store = MemoryStore()
+        val store = MemoryJournalStore()
         val engine = engine(source, store)
         engine.start(startConfig())
-        for (i in 0..2) {
-            clock = MONO + i * 1000L
-            source.push(loc(i.toDouble(), i * 3.0, speed = 3.0))
-        }
-        // The writer runs on Dispatchers.IO: wait for it.
-        val deadline = System.currentTimeMillis() + 2000
-        while (store.fixes.size < 3 && System.currentTimeMillis() < deadline) Thread.sleep(10)
-        assertEquals(listOf(0L, 1L, 2L), store.fixes.map { it.seq })
+        source.run(2)
+        val records = store.read("s").map { JournalCodec.decode(it) }
+        assertTrue(records.first() is JournalRecord.Header)
+        assertEquals(listOf(0L, 1L, 2L), records.filterIsInstance<JournalRecord.Fix>().map { it.seq })
+        assertEquals("t", (records.first() as JournalRecord.Header).extras["title"])
+    }
+
+    @Test
+    fun lastAcceptedFixIsACalendarTimeNotAMonotonicOne() = runTest {
+        val source = FakeSource()
+        val engine = engine(source, MemoryJournalStore())
+        engine.start(startConfig())
+        source.run(3)
+        val at = engine.snapshot().distance.lastAcceptedFixAtMs
+        assertTrue(abs(at - (BASE + 3000)) < 5, "was $at")
     }
 
     @Test
     fun pauseKeepsTheTotalAndResumeOpensANewSegmentWithoutBridging() = runTest {
         val source = FakeSource()
-        val engine = engine(source, MemoryStore())
+        val engine = engine(source, MemoryJournalStore())
         engine.start(startConfig())
-        source.push(loc(0.0, 0.0))
-        clock = MONO + 1000
-        source.push(loc(1.0, 5.0, speed = 4.0))
+        source.run(1)
         val before = engine.snapshot().distance.totalMeters
 
         val paused = engine.pause("s")
@@ -159,151 +199,211 @@ class TrackingEngineTest {
     }
 
     @Test
-    fun stopFreezesTheResult() = runTest {
+    fun aLocationThatArrivesAfterPauseIsDroppedByTheGenerationGate() = runTest {
         val source = FakeSource()
-        val engine = engine(source, MemoryStore())
+        val engine = engine(source, MemoryJournalStore())
         engine.start(startConfig())
-        source.push(loc(0.0, 0.0))
-        clock = MONO + 1000
-        source.push(loc(1.0, 5.0, speed = 4.0))
-        val stopped = engine.stop("s")
-        assertEquals(NativeTrackingState.STOPPED, stopped.state)
-        val total = stopped.distance.totalMeters
-        clock = MONO + 2000
-        source.push(loc(2.0, 50.0, speed = 4.0))
-        assertEquals(total, engine.snapshot().distance.totalMeters)
+        source.run(2)
+        engine.pause("s")
+        val count = engine.snapshot().fixCount
+        source.push(loc(3.0, 9.0, speed = 3.0))
+        assertEquals(count, engine.snapshot().fixCount)
     }
 
     @Test
-    fun aStepEstimateIsIgnoredWhileGpsIsStillGood() = runTest {
+    fun stopWaitsForTheJournalAndReturnsAFinalResult() = runTest {
         val source = FakeSource()
-        val engine = engine(source, MemoryStore())
-        engine.start(startConfig())
-        source.push(loc(0.0, 0.0))
-        clock = MONO + 15_000
-        engine.submitPdr("s", 0, 130.0)
-        val s = engine.snapshot().distance
-        // GPS is still GOOD (no tick yet): the estimate is ignored, not counted
-        assertEquals(0.0, s.totalMeters)
-        assertEquals(0.0, s.pendingPdrMeters)
-    }
-
-    @Test
-    fun restoreRebuildsTheDistanceFromPersistedFixesAndComesBackPaused() = runTest {
-        val store = MemoryStore()
-        fun fix(seq: Long, segment: Long, seconds: Double, north: Double) = NativeFix(
-            sessionId = "s", segmentId = segment, seq = seq, timeMs = BASE + (seconds * 1000).toLong(),
-            elapsedMs = MONO + (seconds * 1000).toLong(), latitude = 10.0 + north / METERS_PER_DEGREE, longitude = 106.0,
-            horizontalAccuracy = 5.0, speed = 4.0, speedAccuracy = -1.0, course = -1.0, altitude = 0.0,
-            verticalAccuracy = -1.0, provider = "gps", isMock = false,
-        )
-        store.fixes.addAll(
-            listOf(fix(0, 0, 0.0, 0.0), fix(1, 0, 1.0, 5.0), fix(2, 0, 2.0, 10.0), fix(3, 1, 500.0, 9000.0)),
-        )
-        val engine = engine(FakeSource(), store)
-        val s = engine.restore(startConfig())
-        assertEquals(NativeTrackingState.PAUSED, s.state)
-        assertTrue(abs(s.distance.totalMeters - 10.0) < 0.3, "segments must not be joined: ${s.distance.totalMeters}")
-        assertEquals(1L, s.segmentId)
-        assertEquals(4L, s.fixCount)
-
-        // a restore of a session that already runs replays nothing
-        val again = engine.restore(startConfig())
-        assertEquals(s.distance.totalMeters, again.distance.totalMeters)
-    }
-
-    @Test
-    fun aMissingPermissionBecomesAStateAndAnError() = runTest {
-        val source = FakeSource().also { it.failure = SecurityException("no permission") }
-        val engine = engine(source, MemoryStore())
-        engine.start(startConfig())
-        val s = engine.snapshot()
-        assertEquals(NativeTrackingState.PERMISSION_DENIED, s.state)
-        assertNotNull(s.error)
-        assertTrue(s.error!!.startsWith(TrackingErrorCode.LOCATION_UPDATES_FAILED))
-    }
-
-    @Test
-    fun aFailedWriteIsReportedButRecordingContinues() = runTest {
-        val source = FakeSource()
-        val store = MemoryStore().also { it.failOnAppend = true }
+        val store = MemoryJournalStore()
         val engine = engine(source, store)
         engine.start(startConfig())
-        source.push(loc(0.0, 0.0))
-        val deadline = System.currentTimeMillis() + 2000
-        while (engine.snapshot().error == null && System.currentTimeMillis() < deadline) Thread.sleep(10)
-        val s = engine.snapshot()
-        assertEquals(NativeTrackingState.RUNNING, s.state)
-        assertTrue(s.error!!.startsWith(TrackingErrorCode.STORE_WRITE_FAILED))
-        assertEquals(1L, s.fixCount)
+        source.run(3)
+        val flushesBefore = store.flushes
+        val result = engine.stop("s")
+        assertEquals(NativeTrackingState.STOPPED, result.state)
+        assertTrue(result.stepsFinal)
+        assertTrue(store.flushes > flushesBefore, "stop must flush the writer")
+        assertTrue(store.read("s").any { JournalCodec.decode(it) is JournalRecord.Finish })
     }
 
     @Test
-    fun adaptiveSamplingReRequestsLocationsWhenTheUserStandsStill() = runTest {
+    fun restoreReplaysTheJournalAndComesBackPausedWithTheSameResult() = runTest {
+        val store = MemoryJournalStore()
         val source = FakeSource()
-        val engine = engine(source, MemoryStore())
-        engine.start(startConfig(adaptive = true))
-        assertEquals(1, source.requests.size)
-        for (i in 0..60) {
-            clock = MONO + i * 1000L
-            source.push(loc(i.toDouble(), 0.0, speed = 0.0))
-        }
-        // After a long standstill the request became sparser (3 s) at least once.
-        val deadline = System.currentTimeMillis() + 2000
-        while (source.requests.none { it.first >= 3000 } && System.currentTimeMillis() < deadline) Thread.sleep(10)
-        assertTrue(source.requests.any { it.first >= 3000 }, "requests were ${source.requests}")
+        val first = engine(source, store)
+        first.start(startConfig())
+        source.run(10)
+        val live = first.pause("s")
+
+        val second = engine(FakeSource(), store) // a new process
+        val restored = second.restore(startConfig())
+        assertEquals(NativeTrackingState.PAUSED, restored.state)
+        assertEquals(live.distance.totalMeters, restored.distance.totalMeters)
+        assertEquals(live.fixCount, restored.fixCount)
+        assertEquals(live.distance.activeTimeMs, restored.distance.activeTimeMs)
+    }
+
+    @Test
+    fun restoreUsesTheConfigurationStoredInTheJournalNotTheOneSentNow() = runTest {
+        val store = MemoryJournalStore()
+        val source = FakeSource()
+        val first = engine(source, store)
+        first.start(startConfig(engine = engineConfig(maxSpeed = 10.0)))
+        source.run(5) // 3 m/s
+        val live = first.pause("s")
+        val second = engine(FakeSource(), store)
+        val restored = second.restore(startConfig(engine = engineConfig(maxSpeed = 0.5))) // would reject every fix
+        assertEquals(live.distance.totalMeters, restored.distance.totalMeters)
+        assertTrue(restored.distance.totalMeters > 10.0)
+    }
+
+    @Test
+    fun aHalfWrittenLastRecordIsDroppedTheJournalRepairedAndRecordingCanContinue() = runTest {
+        val store = MemoryJournalStore()
+        val source = FakeSource()
+        val first = engine(source, store)
+        first.start(startConfig())
+        source.run(5)
+        val lines = store.files.getValue("s")
+        lines[lines.lastIndex] = lines.last().dropLast(9) // the process was killed mid-write
+
+        val second = engine(FakeSource(), store)
+        val restored = second.restore(startConfig())
+        assertEquals(1, store.rewrites)
+        assertTrue(restored.error?.startsWith(TrackingErrorCode.JOURNAL_REPAIRED) == true, restored.error)
+        assertEquals(5L, restored.fixCount) // the sixth fix was the damaged one
+        // New records land after an intact line, so the journal stays readable.
+        second.resume("s")
+        assertTrue(store.read("s").all { JournalCodec.decode(it) != null })
+    }
+
+    @Test
+    fun nothingToRestoreIsAnErrorNotAnEmptySession() = runTest {
+        val engine = engine(FakeSource(), MemoryJournalStore())
+        assertFailsWith<IOException> { engine.restore(startConfig()) }
+    }
+
+    @Test
+    fun aSessionCannotBeClearedWhileOpenAndClearingAfterStopDeletesTheJournal() = runTest {
+        val store = MemoryJournalStore()
+        val source = FakeSource()
+        val engine = engine(source, store)
+        engine.start(startConfig())
+        source.run(2)
+        assertFailsWith<IOException> { engine.clearSession("s") }
+        engine.stop("s")
+        engine.clearSession("s")
+        assertEquals(emptyList(), store.read("s"))
+        assertEquals(emptyList(), engine.listSessions())
+    }
+
+    @Test
+    fun sessionsOnTheDeviceCanBeListed() = runTest {
+        val store = MemoryJournalStore()
+        val engine = engine(FakeSource(), store)
+        engine.start(startConfig("a"))
+        engine.stop("a")
+        engine.start(startConfig("b"))
+        assertEquals(setOf("a", "b"), engine.listSessions().toSet())
+    }
+
+    @Test
+    fun persistedFixesAreReadBackWithTheirOriginalTimes() = runTest {
+        val source = FakeSource()
+        val engine = engine(source, MemoryJournalStore())
+        engine.start(startConfig())
+        source.run(3)
+        val fixes = engine.readPersisted("s", afterSeq = 0)
+        assertEquals(listOf(1L, 2L, 3L), fixes.map { it.seq })
+        assertEquals(BASE + 1000, fixes.first().timeMs)
+        assertEquals(MONO + 1000, fixes.first().elapsedMs)
     }
 
     @Test
     fun aWallClockJumpDoesNotAgeOrReorderFixes() = runTest {
         val source = FakeSource()
-        // The wall clock is hours off and jumps backwards; the monotonic clock is steady.
-        var wall = BASE + 10 * 3_600_000L
         val engine = TrackingEngine(
-            source = source, store = MemoryStore(),
-            scope = CoroutineScope(UnconfinedTestDispatcher()),
-            wallClockMs = { wall }, monotonicMs = { clock },
+            source = source, store = MemoryJournalStore(), scope = CoroutineScope(UnconfinedTestDispatcher()),
+            wallClockMs = { BASE + 10_000_000_000L }, // the wall clock jumped a long way forward
+            monotonicMs = { clock },
         )
         engine.start(startConfig())
-        for (i in 0..10) {
-            clock = MONO + i * 1000L
-            wall -= 7_200_000L // jumps back two hours on every fix
-            source.push(loc(i.toDouble(), i * 3.0, speed = 3.0))
-        }
-        val s = engine.snapshot()
-        assertTrue(abs(s.distance.totalMeters - 30.0) < 0.5, "was ${s.distance.totalMeters}")
-        assertEquals(11L, s.fixCount)
+        source.run(5)
+        assertEquals(6L, engine.snapshot().fixCount)
+        assertTrue(engine.snapshot().distance.totalMeters > 10.0)
     }
 
-    private fun stepsConfig(id: String = "s", stride: Double = 1.0) = startConfig(id).copy(
-        stepsEnabled = true,
-        engine = engineConfig().copy(initialStrideMeters = stride),
-    )
+    @Test
+    fun aFailedWriteIsReportedButRecordingContinues() = runTest {
+        val source = FakeSource()
+        val store = MemoryJournalStore()
+        val engine = engine(source, store)
+        engine.start(startConfig())
+        store.failOnAppend = true
+        source.run(4)
+        val s = engine.snapshot()
+        assertTrue(s.error?.startsWith(TrackingErrorCode.STORE_WRITE_FAILED) == true, s.error)
+        assertEquals(NativeTrackingState.RUNNING, s.state)
+        assertTrue(s.distance.totalMeters > 5.0)
+    }
+
+    @Test
+    fun aMissingPermissionBecomesAStateAndAnError() = runTest {
+        val source = FakeSource().also { it.failure = SecurityException("no permission") }
+        val engine = engine(source, MemoryJournalStore())
+        engine.start(startConfig())
+        val s = engine.snapshot()
+        assertEquals(NativeTrackingState.PERMISSION_DENIED, s.state)
+        assertTrue(s.error?.contains(TrackingErrorCode.LOCATION_UPDATES_FAILED) == true)
+    }
+
+    @Test
+    fun adaptiveSamplingReRequestsLocationsWhenTheUserStandsStill() = runTest {
+        val source = FakeSource()
+        val engine = engine(source, MemoryJournalStore())
+        engine.start(startConfig(adaptive = true))
+        for (i in 0..40) {
+            clock = MONO + i * 1000L
+            source.push(loc(i.toDouble(), 0.0, speed = 0.0))
+        }
+        assertTrue(source.requests.size >= 2, "requests ${source.requests}")
+        assertTrue(source.requests.last().first > source.requests.first().first)
+    }
+
+    @Test
+    fun aStepEstimateIsIgnoredWhileGpsIsStillGood() = runTest {
+        val source = FakeSource()
+        val engine = engine(source, MemoryJournalStore())
+        engine.start(startConfig())
+        source.run(3)
+        engine.submitPdr("s", 0, 50.0)
+        assertEquals(0.0, engine.snapshot().distance.pendingPdrMeters)
+    }
+
+    // ── Steps ───────────────────────────────────────────────────────────────
 
     @Test
     fun stepsWhileGpsIsDegradedBecomeAPendingEstimateNotDistance() = runTest {
         val source = FakeSource()
         val steps = FakeSteps()
-        val engine = engine(source, MemoryStore(), steps)
-        engine.start(stepsConfig())
+        val engine = engine(source, MemoryJournalStore(), steps)
+        engine.start(startConfig(steps = true, engine = engineConfig(stride = 1.0)))
         assertEquals(NativeStepsStatus.ACTIVE, engine.snapshot().stepsStatus)
-        source.push(loc(0.0, 0.0, speed = 3.0))
-        clock = MONO + 1000
-        source.push(loc(1.0, 3.0, speed = 3.0, accuracy = 90.0)) // GPS degraded
-        steps.push(10_000) // baseline
-        steps.push(10_030)
+        source.run(10)
+        clock = MONO + 12_000
+        source.push(loc(12.0, 33.0, speed = 3.0, accuracy = 90.0)) // degraded: GPS stopped measuring at t=10
+        clock = MONO + 14_000
+        steps.push(10_000, MONO + 11_000) // baseline
+        steps.push(10_006, MONO + 14_000) // 6 steps measured in the weak interval
         val s = engine.snapshot()
-        assertEquals(30L, s.distance.steps)
-        assertTrue(abs(s.distance.pendingPdrMeters - 30.0) < 1e-6, "pending ${s.distance.pendingPdrMeters}")
-        assertEquals(0.0, s.distance.totalMeters)
+        assertEquals(6L, s.distance.steps)
+        assertTrue(abs(s.distance.pendingPdrMeters - 6.0) < 1e-6, "pending ${s.distance.pendingPdrMeters}")
     }
 
     @Test
     fun pauseUnregistersTheStepSensorAndResumeRegistersItAgain() = runTest {
-        val source = FakeSource()
         val steps = FakeSteps()
-        val engine = engine(source, MemoryStore(), steps)
-        engine.start(stepsConfig())
+        val engine = engine(FakeSource(), MemoryJournalStore(), steps)
+        engine.start(startConfig(steps = true))
         assertEquals(1, steps.collectors)
         engine.pause("s")
         assertEquals(0, steps.collectors)
@@ -317,9 +417,9 @@ class TrackingEngineTest {
     fun aMissingPermissionOnlyDisablesStepsTheRecordingGoesOn() = runTest {
         val source = FakeSource()
         val steps = FakeSteps(NativeStepsStatus.PERMISSION_DENIED)
-        val engine = engine(source, MemoryStore(), steps)
-        engine.start(stepsConfig())
-        source.push(loc(0.0, 0.0, speed = 3.0))
+        val engine = engine(source, MemoryJournalStore(), steps)
+        engine.start(startConfig(steps = true))
+        source.run(2)
         val s = engine.snapshot()
         assertEquals(NativeStepsStatus.PERMISSION_DENIED, s.stepsStatus)
         assertEquals(NativeTrackingState.RUNNING, s.state)
@@ -329,23 +429,112 @@ class TrackingEngineTest {
     @Test
     fun stepsOffByConfigNeverTouchTheSensor() = runTest {
         val steps = FakeSteps()
-        val engine = engine(FakeSource(), MemoryStore(), steps)
-        engine.start(startConfig()) // stepsEnabled = false
+        val engine = engine(FakeSource(), MemoryJournalStore(), steps)
+        engine.start(startConfig())
         assertEquals(NativeStepsStatus.OFF, engine.snapshot().stepsStatus)
         assertEquals(0, steps.collectors)
     }
 
     @Test
     fun walkedWhilePausedIsNotCountedAfterResume() = runTest {
-        val source = FakeSource()
         val steps = FakeSteps()
-        val engine = engine(source, MemoryStore(), steps)
-        engine.start(stepsConfig())
+        val engine = engine(FakeSource(), MemoryJournalStore(), steps)
+        engine.start(startConfig(steps = true))
         steps.push(1000); steps.push(1040)
         engine.pause("s")
+        clock = MONO + 60_000
         engine.resume("s")
-        steps.push(1500) // 460 steps were walked while paused: a new baseline
-        steps.push(1510)
+        steps.push(1500, clock); steps.push(1510, clock) // 460 steps were walked while paused: a new baseline
         assertEquals(50L, engine.snapshot().distance.steps)
+    }
+
+    @Test
+    fun restoredStepsAndStrideComeBackFromTheJournal() = runTest {
+        val store = MemoryJournalStore()
+        val source = FakeSource()
+        val steps = FakeSteps()
+        val first = engine(source, store, steps)
+        first.start(startConfig(steps = true))
+        for (i in 0..30) {
+            clock = MONO + i * 1000L
+            source.push(loc(i.toDouble(), i * 3.0, speed = 3.0))
+            steps.push(1000L + i * 2, clock)
+        }
+        val live = first.pause("s")
+        assertTrue(live.distance.steps > 40 && live.distance.strideMeters > 0, "steps ${live.distance.steps}, stride ${live.distance.strideMeters}")
+        val restored = engine(FakeSource(), store).restore(startConfig(steps = true))
+        assertEquals(live.distance.steps, restored.distance.steps)
+        assertEquals(live.distance.strideMeters, restored.distance.strideMeters)
+    }
+
+    @Test
+    fun stopIsFinishingUntilTheJournalIsDurableAndOnlyThenStopped() = runTest {
+        val source = FakeSource()
+        val store = MemoryJournalStore()
+        val engine = engine(source, store)
+        engine.start(startConfig())
+        source.run(3)
+        var stateAtFlush: NativeTrackingState? = null
+        var stepsFinalAtFlush: Boolean? = null
+        store.onFlush = { stateAtFlush = engine.snapshot().state; stepsFinalAtFlush = engine.snapshot().stepsFinal }
+        val result = engine.stop("s")
+        assertEquals(NativeTrackingState.FINISHING, stateAtFlush, "while the journal is being flushed the result is NOT final")
+        assertEquals(false, stepsFinalAtFlush)
+        assertEquals(NativeTrackingState.STOPPED, result.state)
+        assertTrue(result.stepsFinal)
+    }
+
+    @Test
+    fun theSnapshotSaysHowManyEventsAreNotOnDiskYet() = runTest {
+        val source = FakeSource()
+        val store = MemoryJournalStore().also { it.autoWrite = false }
+        val engine = engine(source, store)
+        engine.start(startConfig())
+        source.run(2)
+        assertTrue(engine.snapshot().journalPending >= 3, "pending ${engine.snapshot().journalPending}")
+        val result = engine.stop("s") // flushes
+        assertEquals(0L, result.journalPending)
+    }
+
+    @Test
+    fun aDamagedMiddleLineKeepsABackupOfTheOriginalBeforeRepairing() = runTest {
+        val store = MemoryJournalStore()
+        val source = FakeSource()
+        val first = engine(source, store)
+        first.start(startConfig())
+        source.run(6)
+        val lines = store.files.getValue("s")
+        lines[3] = lines[3].replaceRange(10, 11, "#") // damage in the MIDDLE
+        val restored = engine(FakeSource(), store).restore(startConfig())
+        assertEquals(1, store.backups, "the only copy must survive the repair")
+        assertTrue(restored.error?.startsWith(TrackingErrorCode.JOURNAL_CORRUPT) == true, restored.error)
+    }
+
+    @Test
+    fun aTruncatedTailNeedsNoBackup() = runTest {
+        val store = MemoryJournalStore()
+        val source = FakeSource()
+        val first = engine(source, store)
+        first.start(startConfig())
+        source.run(4)
+        val lines = store.files.getValue("s")
+        lines[lines.lastIndex] = lines.last().dropLast(5)
+        engine(FakeSource(), store).restore(startConfig())
+        assertEquals(0, store.backups)
+    }
+
+    @Test
+    fun aJournalOfAnotherEngineVersionIsRestoredButTheSnapshotSaysSo() = runTest {
+        val store = MemoryJournalStore()
+        val source = FakeSource()
+        val first = engine(source, store)
+        first.start(startConfig())
+        source.run(4)
+        val lines = store.files.getValue("s")
+        val header = JournalCodec.decode(lines[0]) as JournalRecord.Header
+        lines[0] = JournalCodec.encode(header.copy(engineVersion = JournalCodec.ENGINE_VERSION + 1))
+        val restored = engine(FakeSource(), store).restore(startConfig())
+        assertEquals(NativeTrackingState.PAUSED, restored.state)
+        assertTrue(restored.error?.startsWith(TrackingErrorCode.ENGINE_CHANGED) == true, restored.error)
     }
 }

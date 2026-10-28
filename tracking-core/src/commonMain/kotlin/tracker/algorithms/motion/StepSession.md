@@ -25,3 +25,6 @@
 
 ## Used by / tested by
 `TrackingCoreBridge` (owns one). Tested by `StepsTest` (`StepSessionTest`, `BridgeStepsTest`).
+
+## Review fixes (74e1cd7 baseline)
+Closed step input is ignored before any accounting mutation. `hasClosedSegment` prevents an exact correction before a segment has ever closed. The existing idempotent close fix is retained.

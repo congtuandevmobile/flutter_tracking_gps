@@ -24,3 +24,5 @@ No allocation of steps into small stretches inside a long gap, no handling of cu
 
 ## Used by
 `GpsDistanceEngine.recover`.
+
+`reconcile(..., strideCalibrated)`: with `PdrPolicy.TRUSTED_WHEN_CALIBRATED`, a calibrated stride and a pending estimate, the credit is the larger of the straight line and `min(estimate, speed ceiling * gap)`, even beyond `maxBridgeMs`; source `PDR` when the estimate wins. Never a sum.

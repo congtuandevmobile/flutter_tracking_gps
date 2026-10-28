@@ -28,7 +28,21 @@ enum class FixVerdict {
     REANCHORED,
 }
 
-enum class PdrPolicy { OFF, CONFIRMED_BY_GPS }
+enum class PdrPolicy {
+    OFF,
+
+    /** A step estimate only counts as far as the returning GPS corroborates it. */
+    CONFIRMED_BY_GPS,
+
+    /**
+     * Like [CONFIRMED_BY_GPS], but once the stride has been calibrated on good
+     * GPS the estimate for a gap is credited as ESTIMATED distance (source `PDR`)
+     * even when the gap is long or the route curves, bounded by the speed
+     * ceiling. Opt-in: a phone shaken in the hand during a gap can then be
+     * credited, which the conservative policies never do.
+     */
+    TRUSTED_WHEN_CALIBRATED,
+}
 
 enum class Smoothing { OFF, KALMAN }
 
@@ -78,6 +92,13 @@ data class TrackingConfig(
      * estimate until GPS has taught the engine a stride in this session.
      */
     val initialStrideMeters: Double? = null,
+    /**
+     * With a working step sensor and a pedestrian policy, a GPS gap at least this
+     * long in which the sensor measured NO steps is credited 0 m (the person was
+     * standing). Shorter gaps are not judged: Android may deliver steps ~10 s
+     * late. Zero or negative disables the rule.
+     */
+    val recoveryStepEvidenceAfterMs: Long = 30_000,
 ) {
     init {
         require(maxAccuracyMeters.isFinite() && maxAccuracyMeters > 0.0) { "maxAccuracyMeters" }
@@ -140,4 +161,13 @@ data class TrackingSnapshot(
     val isStopped: Boolean,
     /** Learned (or configured) metres per step; null while unknown. */
     val strideMeters: Double? = null,
+    /** Workout time: the running legs only, pauses excluded. */
+    val activeTimeMs: Long = 0,
+    /** GPS gaps that were credited (bridge or estimate): their time. */
+    val bridgedGapMs: Long = 0,
+    /** GPS gaps and unmeasured intervals that were NOT credited: their time. */
+    val uncreditedGapMs: Long = 0,
+    val uncreditedGaps: Int = 0,
+    /** Steps measured in a batch that straddles a GPS-quality change: used for nothing. */
+    val ambiguousSteps: Long = 0,
 )

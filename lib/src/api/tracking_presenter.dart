@@ -9,24 +9,18 @@ import 'package:flutter_tracking_gps/src/domain/tracking_snapshot.dart';
 /// shown on iOS, and Android shows the SDK's own default notification.
 ///
 /// Rules every presenter can rely on:
-///  * Calls are made from the Flutter isolate, in order, and never overlap: the
-///    next call waits for the previous future.
-///  * A throwing or slow presenter never affects the recording: errors go to
-///    `TrackingSession.onPresenterError` and the SDK carries on.
+///  * Lifecycle calls (start, pause, resume, finish) are made from the Flutter
+///    isolate, in order, and never overlap; `onUpdate` calls are coalesced (only
+///    the newest is delivered) so a slow presenter never builds a backlog.
+///  * A throwing or slow presenter never affects the recording: every call has a
+///    time limit (`presenterTimeout`), and errors and timeouts go to
+///    `TrackingSession.onPresenterError`; the SDK carries on.
 ///  * The snapshot is the same object the app receives from `session.updates`.
 ///  * They stop being called when the Flutter engine is gone. Native keeps
 ///    recording and, on Android, the SDK's own notification stays; a presenter's
 ///    surface does not update.
 abstract class TrackingPresenter {
   const TrackingPresenter();
-
-  /// Android only. True when this presenter owns a foreground service of type
-  /// `location`. The SDK then starts NO foreground service or notification of
-  /// its own and relies on the presenter's to keep the process, and so the
-  /// recording, alive. False
-  /// (default): the SDK keeps its own service and notification, and the
-  /// presenter's surface is shown in addition. Ignored on iOS.
-  bool get ownsAndroidForegroundService => false;
 
   /// The session started (state running).
   Future<void> onStart(TrackingSnapshot snapshot) async {}

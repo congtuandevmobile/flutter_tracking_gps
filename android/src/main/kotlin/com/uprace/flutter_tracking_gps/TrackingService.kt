@@ -19,8 +19,11 @@ import androidx.core.app.NotificationCompat
  * tapping it returns to the app. It owns no tracking logic and shows no live
  * data: the [TrackingEngine] does the work.
  *
- * It is NOT started when the app picked `NativeForegroundMode.EXTERNAL` (a
- * third-party plugin then owns a foreground service).
+ * The SDK ALWAYS runs it while a session records, so the recording never depends on a
+ * third party to keep the process alive. A presenter that wants a richer surface
+ * can replace this notification's content by posting with the same notification id
+ * ([NOTIFICATION_ID]) and channel ([CHANNEL_ID]); if it fails or its engine dies,
+ * this one stays.
  */
 class TrackingService : Service() {
 
@@ -86,9 +89,9 @@ class TrackingService : Service() {
         const val ACTION_STOP = "com.uprace.flutter_tracking_gps.STOP"
         const val EXTRA_TITLE = "title"
         const val EXTRA_TEXT = "text"
-        private const val CHANNEL_ID = "flutter_tracking_gps"
+        const val CHANNEL_ID = "flutter_tracking_gps"
         private const val CHANNEL_NAME = "Activity recording"
-        private const val NOTIFICATION_ID = 7421
+        const val NOTIFICATION_ID = 7421
         private const val DEFAULT_TITLE = "Recording"
         private const val DEFAULT_TEXT = "Tracking your activity. Tap to return to the app."
     }

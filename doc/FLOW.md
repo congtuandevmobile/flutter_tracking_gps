@@ -7,12 +7,14 @@ reasoning, not measured**: tune it from real recordings (see `TrackingConfig`).
 ## Layers
 
 ```
-GPS hardware
-   │  raw locations
+GPS hardware / step sensor / (a watch)
+   │  raw locations, step readings
    ▼
-Native (Kotlin / Swift)        collects fixes, numbers them, persists them,
-   │                           1 Hz tick, adaptive sampling
-   │  every fix
+Native (Kotlin / Swift)        collects, numbers fixes, schedules the 1 Hz tick,
+   │                           adaptive sampling, permissions, foreground service
+   ▼
+SessionRecorder (Kotlin core)  WRITES EVERY INPUT TO THE JOURNAL, THEN applies it
+   │                           (one writer, flush barrier, CRC per line; see JOURNAL.md)
    ▼
 TrackingCoreBridge             one door, primitives only
    ▼
@@ -21,21 +23,44 @@ GpsDistanceEngine (Kotlin)     the only place that decides what is distance
    ▼
 NativeSnapshot  (Pigeon, EventChannel, ~1 Hz)
    ▼
-TrackingSession (Dart)         commands + maps the snapshot for the UI
+TrackingSession (Dart)         commands, snapshots for the UI, presenter hook
 ```
 
 - **Native owns the session AND the distance.** If the Flutter engine dies,
-  native keeps recording and keeps measuring (so a notification could keep
-  showing the distance). After a process death `restoreSession` replays the
-  persisted fixes through the same engine and the session comes back paused.
-- **The engine is pure.** Time is passed in; no platform call. A recording can be
-  replayed fix by fix. The Dart engine (`lib/src/engine`) is a reference twin: the
-  same CSV fixtures (`test/fixtures`) run through both.
+  native keeps recording and keeps measuring.
+- **The engine is a pure function of the journal.** Time is passed in; no
+  platform call. Replaying the journal reproduces the live result exactly
+  (distance, pending estimates, stride, steps, gaps, times), so a restore after a
+  process death loses nothing that was recorded. The Dart engine
+  (`lib/src/engine`) is a reference twin of the DISTANCE rules: the same CSV
+  fixtures (`test/fixtures`) run through both. It has no time model, adaptive
+  sampling, Kalman gate or journal.
+- **A watch is one more producer.** Fixes and step readings are source-agnostic
+  events with a measurement time. A watch app embeds the same core (the KMP core
+  compiles for the JVM and Apple targets) and writes the same journal records; the
+  phone can replay a watch's journal. Nothing in the rules assumes a phone.
 
 ## Time
+
 Every time the engine sees comes from one **monotonic** clock (Android
 `elapsedRealtime`, iOS `CLOCK_MONOTONIC`): a wall-clock jump can neither reorder
-nor age a fix. Wall time is only kept for display and storage.
+nor age a fix. Wall time is only kept for display and storage; the public
+`lastFixAt` is converted to calendar time at the native boundary.
+
+Three durations are reported. They are NOT three parts that add up: **moving and uncredited are each a part OF the active time**, never added on top of it (`moving <= active`, `bridged + uncredited <= active`; a test pins this).
+
+| Time | Meaning |
+|---|---|
+| **active** (`activeTime`) | The running legs only; pauses excluded. The headline timer. |
+| **moving** (`movingTime`) | Time moving: speed above the stationary limit, plus the time of credited GPS gaps that were crossed at moving speed. |
+| **uncredited** (`uncreditedGap`, `uncreditedGaps`) | The part of the active time whose DISTANCE is unknown: GPS gaps and unmeasured intervals NOTHING was credited for: a weak start, a gap beyond `maxBridge`, a gap with no steps, a gap still open at finish. |
+
+The uncredited time is **reported, never hidden**: for that time the distance is
+unknown, not zero. (It is about unknown DISTANCE, not unknown motion: GPS lost does
+not mean motion unknown, since steps may still show it. A separate
+"unknown motion" duration is not defined here.) The three names are this SDK's
+own; they are not claimed to match another app's definitions. An app that wants to be honest shows it ("GPS lost for 2 min
+10 s").
 
 ## Three independent states
 
@@ -110,6 +135,25 @@ screen does not move; it jumps when GPS returns.
 | Slow walker, Doppler under 0.4 | Counts as stationary. Known limit: tune `stationarySpeedMps` from data |
 | Cycling | Use `TrackingConfig.forSport(cycling)` (25 m/s ceiling); do not submit step estimates |
 
+## Standing still, and gaps that are too long
+
+- **Doppler below 0.4 m/s** (when its own accuracy is decent) = no distance.
+- **No usable Doppler:** the speed is taken from the displacement itself; below
+  the stationary limit = no distance.
+- **Stopped (stayed within the stay radius for 30 s) and a fix still inside it:**
+  jitter, no distance. The anchor stays put, so when the person leaves the radius
+  the whole displacement is credited at once: nothing is lost.
+- **A gap with a working step sensor and no steps at all** (and a gap of at least
+  30 s, since Android may deliver steps ~10 s late) is credited 0 m: the person
+  stood still. Cycling (no steps) is never judged this way.
+- **A gap beyond `maxBridge`, or a loop:** the conservative policies credit what
+  GPS can corroborate (possibly 0 m) and REPORT the time as uncredited.
+- **`PdrPolicy.trustedWhenCalibrated` (opt-in):** once the stride was calibrated on
+  good GPS (3 windows), a gap is credited from the steps as ESTIMATED distance
+  (source `PDR`, kept separate from GPS in the API), bounded by the speed ceiling,
+  even when it is long or curved. The price: steps without movement (a phone
+  shaken in the hand) can then be credited. The default never does that.
+
 ## Steps (native sensor, shared core)
 
 Opt in with `createSession(stepsEnabled: true)`. Native reads the sensor (Android
@@ -136,11 +180,23 @@ sensor ─► StepSession (baseline / segments / counter reset)  ─► steps de
   yet, none in `TrackingConfig.initialStrideMeters`) nothing is estimated.
   Pass the stride learned in the user's last recording (`snapshot.strideMeters`)
   as `initialStrideMeters` so a weak start still counts.
+- **A batch is judged by the interval it was MEASURED in**, not by when it was
+  delivered. The engine keeps a short timeline of when GPS was measuring; a batch
+  wholly in good GPS teaches the stride, wholly in a weak interval becomes pending,
+  and a batch straddling a quality change is `ambiguousSteps`: it STAYS in the step
+  total and in the journal (so it can be debugged or reprocessed), but is not used
+  to learn the stride nor to make a pending estimate, and is never split evenly and
+  called exact. A weak batch that arrives after GPS came
+  back is too late to attach.
 - Pause: the segment is closed, the learning window dropped, the stride kept.
   Resume: Android takes a fresh baseline (steps walked while paused are never
   counted), iOS counts from the new segment's start date. At a pause iOS asks the
   OS for the exact count up to the boundary and corrects the displayed total
-  (never distance).
+  (never distance). **Finish waits** for that exact count (3 s limit): the answer
+  carries the identity (session, segment) it was asked for, so a late one can
+  never touch a newer session; if it fails or times out the snapshot says so with
+  a stable code and `stepsFinal == false`, and the live count is kept (never
+  reported as 0).
 - No permission / no sensor: the recording goes on, `snapshot.stepsStatus` says
   why. Ask with `requestStepsPermission()` (Android 10+ `ACTIVITY_RECOGNITION`,
   iOS Motion & Fitness; iOS also prompts at the first start when not asked).
@@ -149,9 +205,46 @@ sensor ─► StepSession (baseline / segments / counter reset)  ─► steps de
   with its LAST step, so steps near a pause are under-counted; the core is fed
   the arrival time. Stride, thresholds and cadence behaviour are unvalidated.
 
+## Restore, reprocess, persistence and finish
+
+- **One journal per session** (`JOURNAL.md`): a header with the configuration, then
+  every input (lifecycle, fixes with their arrival time, step readings, the tick
+  that detected silence). Written BEFORE it is applied, by ONE writer; `finish`,
+  reading and clearing first wait for it to reach the disk.
+- **Restore REBUILDS what was shown; reprocess RECOMPUTES.** Restore replays the
+  journal with the settings stored in its header. The header also stores the
+  **engine version** (the rules); a journal written by other rules is replayed anyway
+  but the snapshot says `ENGINE_CHANGED` because the result may differ from what was
+  shown. `SessionRecorder.reprocess(lines, settings?)` recomputes with the current
+  rules (and optionally other settings) and writes nothing; use it to recompute,
+  never to resume.
+- **Restore** replays the journal with the configuration stored in ITS header
+  (not the one the app passes later) and comes back PAUSED **at the time of the last journaled event**, not at "now":
+  the time the process was dead is never workout time, and a reboot (the monotonic
+  clock restarts) cannot make a leg negative or join two clocks. `resume` continues in
+  a new segment. A half-written last record is dropped and the file repaired; damage
+  in the middle keeps only the intact part and says so (`JOURNAL_CORRUPT`), AFTER
+  copying the original to `<file>.corrupt` (the repair drops everything after the
+  damage, so it never destroys the only copy); an
+  unusable journal throws. File names come from a hash of the session id, so two
+  ids never collide; `listSessions()` reads the real ids from the headers.
+- **Android resume after a process death** starts the foreground service BEFORE
+  location, tick and steps start; if the OS refuses (for example a start from the
+  background) the session stays paused and `resume` throws
+  `FOREGROUND_START_FAILED`.
+- **Durable or not is public.** `journalPending` counts events accepted but not yet on
+  disk (`isDurable` is true at zero); a crash while it is above zero can lose that many.
+- **Finish is a state, not an instant.** `finishing` (live data closed, exact steps
+  requested, journal flushed) then `finished`. Only `finished` is final; a snapshot
+  published while `finishing` says `stepsFinal == false`.
+- **Callbacks** carry the generation they were registered under and are dropped
+  when it is no longer current; commands wait for the jobs they stop. A late
+  callback can never touch a newer session, segment or state.
+
 ## Foreground notification and live activity
 
-See `PRESENTER.md`.
+The SDK ALWAYS runs its own foreground service on Android, so the recording never
+depends on a third party. See `PRESENTER.md`.
 
 ## Step estimates from the app (optional PDR)
 
@@ -175,10 +268,13 @@ when there is no anchor to confirm it. `PdrPolicy.off` ignores it entirely.
 ## Not done yet
 
 - A real-device pass (battery, background survival, OEM behaviour): none of it is
-  measured.
+  measured, and every threshold is a starting value.
 - Automatic restart after the OS kills the app (iOS significant-change, Android
-  service restart): `restoreSession` rebuilds the state, but something must start
-  the app.
+  service restart): the journal rebuilds the state, but something must start the app.
 - Kalman smoothing is wired but off by default and not validated on devices.
-- Persisted pending step estimates (lost if the process dies).
-- Publishing: homepage and repository URL in `pubspec.yaml`.
+- Sampling accuracy: the sampling plan's `highAccuracy` is not applied natively yet
+  (Android always HIGH_ACCURACY, iOS always best), so `batterySaver` only changes the
+  interval and displacement.
+- A step batch delivered long after its interval cannot be attached to a gap that
+  was already credited (it is lost, not double counted).
+- A watch producer is designed for (same events, same core) but not built here.

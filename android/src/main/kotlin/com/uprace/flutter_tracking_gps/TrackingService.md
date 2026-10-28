@@ -5,7 +5,7 @@
 ## Purpose
 The **default** way the SDK keeps the process alive while a session records: a foreground service of type `location` with a plain ongoing notification. Title and text come from Flutter (`createSession(notificationTitle:, notificationText:)`, defaults "Recording" and "Tracking your activity. Tap to return to the app."); tapping it opens the app. It shows **no live data** and owns **no tracking logic**.
 
-It is **not started** when the app picked `NativeForegroundMode.external` (a third-party presenter, for example a live-activity plugin, then owns a foreground service). See `docs/PRESENTER.md`.
+It is **not started** when the app picked `NativeForegroundMode.external` (a third-party presenter, for example a live-activity plugin, then owns a foreground service). See `doc/PRESENTER.md`.
 
 ## Members
 | Member | Description |
@@ -20,3 +20,5 @@ After a process kill there is no session to continue, and a restarted service wi
 
 ## Notes
 Start from the foreground ("while in use" is enough). Started and stopped by `FlutterTrackingGpsPlugin`.
+
+Updated: the SDK ALWAYS runs this service while a session records (no `external` mode any more), so the recording never depends on a third party. A presenter that wants a richer surface can replace the notification's content by posting with `TrackingService.NOTIFICATION_ID` and `CHANNEL_ID` (public constants). On resume after a process death the plugin starts it BEFORE recording continues.

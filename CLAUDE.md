@@ -1,15 +1,15 @@
 # flutter_tracking_gps
 
 Own GPS tracking engine for UpRace (a planned replacement of
-`flutter_background_geolocation`). Read `docs/FLOW.md` before changing the engine
-and `docs/NATIVE_RULES.md` before touching `android/` or `ios/`.
+`flutter_background_geolocation`). Read `doc/FLOW.md` before changing the engine
+and `doc/NATIVE_RULES.md` before touching `android/` or `ios/`.
 
 - The distance rules live in `tracking-core` (Kotlin, shipped) and have a Dart
   reference twin in `lib/src/engine`. Change a rule in BOTH and add it to a
   fixture in `test/fixtures` so the two cannot drift apart.
 - Native code collects, persists and feeds the core through `TrackingCoreBridge`;
   it never decides distance itself.
-- Native code MUST follow `docs/NATIVE_RULES.md` (coroutines/Flow or GCD, no `!!`,
+- Native code MUST follow `doc/NATIVE_RULES.md` (coroutines/Flow or GCD, no `!!`,
   weak self, results on main, every error as `FlutterError` with code, message,
   details).
 - Pigeon: edit `pigeons/tracking_api.dart`, then
@@ -17,7 +17,7 @@ and `docs/NATIVE_RULES.md` before touching `android/` or `ios/`.
 - Every threshold in `TrackingConfig` is an unmeasured starting value; say so
   when you change one.
 - Do not commit or push without the owner's approval.
-- `tracking-core/` is the shared Kotlin core (see `docs/KMP.md`). Algorithms go
+- `tracking-core/` is the shared Kotlin core (see `doc/KMP.md`). Algorithms go
   there once, with a test in `commonTest`; do not re-implement one in Swift,
   Kotlin-Android or Dart. Rebuild the iOS framework with `tool/build_core.sh`.
 - **Every Swift and Kotlin file has an English `.md` next to it with the same base
@@ -31,8 +31,17 @@ and `docs/NATIVE_RULES.md` before touching `android/` or `ios/`.
 - A step estimate always carries its segment id.
 - Steps: native only reads the sensor; `StepSession` (accounting) and
   `StrideEstimator` (metres) live in `tracking-core` with a Dart twin. A step
-  estimate is always PENDING until returning GPS confirms it. See `docs/FLOW.md`.
+  estimate is always PENDING until returning GPS confirms it. See `doc/FLOW.md`.
 - Live activity / notification: the SDK depends on no such package; apps plug one
-  in through `TrackingPresenter` (`docs/PRESENTER.md`). The Android default
+  in through `TrackingPresenter` (`doc/PRESENTER.md`). The Android default
   notification is a plain native foreground notification (`TrackingService`,
   text from Flutter) so it survives the Flutter engine.
+- Persistence: ONE journal per session (`doc/JOURNAL.md`), written by `SessionRecorder`
+  in the core BEFORE each input is applied. Natives only implement the sink (one
+  writer, `flush` barrier) and the files; they never write a second format. A
+  restore replays the journal with the settings in ITS header. Changing a record
+  needs a version bump and a reader for the old one.
+- The SDK always runs its own Android foreground service; a presenter only draws
+  (`doc/PRESENTER.md`). Never make survival depend on a third party.
+- Time is reported as active / moving / uncredited (`doc/FLOW.md`). Uncredited time
+  is surfaced, never hidden or turned into distance.

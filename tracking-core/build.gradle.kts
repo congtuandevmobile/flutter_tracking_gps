@@ -5,7 +5,7 @@ plugins {
 }
 
 group = "com.uprace.tracker"
-version = "0.0.1"
+version = "0.0.1-beta"
 
 kotlin {
     // Pure algorithms: no platform API, no third-party library. Android compiles

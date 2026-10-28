@@ -18,6 +18,11 @@ internal object TrackingErrorCode {
     const val LOCATION_UPDATES_FAILED = "LOCATION_UPDATES_FAILED"
     const val STORE_WRITE_FAILED = "STORE_WRITE_FAILED"
     const val STEPS_FAILED = "STEPS_FAILED"
+    const val JOURNAL_REPAIRED = "JOURNAL_REPAIRED"
+    const val JOURNAL_CORRUPT = "JOURNAL_CORRUPT"
+    const val ENGINE_CHANGED = "ENGINE_CHANGED"
+    const val FOREGROUND_START_FAILED = "FOREGROUND_START_FAILED"
+    const val STORE_LIST_FAILED = "STORE_LIST_FAILED"
 }
 
 private const val LOG_TAG = "FlutterTrackingGps"

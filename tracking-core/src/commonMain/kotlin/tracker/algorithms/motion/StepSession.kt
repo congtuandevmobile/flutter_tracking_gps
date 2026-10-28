@@ -22,6 +22,7 @@ class StepSession {
     private var lastRaw: Long? = null
     private var lastClosedSteps = 0L
     private var open = false
+    private var hasClosedSegment = false
 
     /** Accepted steps of closed segments plus the open one. */
     val total: Long get() = accepted + segmentSteps
@@ -34,6 +35,7 @@ class StepSession {
         lastRaw = null
         lastClosedSteps = 0
         open = false
+        hasClosedSegment = false
     }
 
     /** A new segment: fresh baseline, accepted total kept. */
@@ -46,7 +48,7 @@ class StepSession {
 
     /** A reading of the device's cumulative counter (Android `TYPE_STEP_COUNTER`). */
     fun onCounter(raw: Long): Long {
-        if (raw < 0) return 0
+        if (!open || raw < 0) return 0
         val before = total
         val base = baselineRaw
         val previous = lastRaw
@@ -68,7 +70,7 @@ class StepSession {
 
     /** A count since the segment started (iOS). A lower reading is ignored. */
     fun onSegmentCount(steps: Long): Long {
-        if (steps < segmentSteps) return 0
+        if (!open || steps < segmentSteps) return 0
         val before = total
         segmentSteps = steps
         return total - before
@@ -84,6 +86,7 @@ class StepSession {
         open = false
         accepted += segmentSteps
         lastClosedSteps = segmentSteps
+        hasClosedSegment = true
         segmentSteps = 0
         baselineRaw = null
         lastRaw = null
@@ -95,7 +98,7 @@ class StepSession {
      * counted steps, or for a negative value. Returns the change to [total].
      */
     fun correctClosedSegment(exactSteps: Long): Long {
-        if (exactSteps < 0 || segmentSteps != 0L) return 0
+        if (!hasClosedSegment || exactSteps < 0 || segmentSteps != 0L) return 0
         val change = exactSteps - lastClosedSteps
         accepted += change
         lastClosedSteps = exactSteps

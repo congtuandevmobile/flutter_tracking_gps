@@ -29,6 +29,10 @@ enum NativeTrackingState {
   idle,
   running,
   paused,
+
+  /// `stop` was asked and is being finalized (live data closed, the exact step
+  /// count requested, the journal flushed). Not final yet: wait for [stopped].
+  finishing,
   stopped,
 
   /// Location permission is missing, so no fix can arrive.
@@ -50,17 +54,9 @@ enum NativeStepsStatus {
 
   /// The device has no step sensor.
   unavailable,
-}
 
-/// Who keeps the Android process alive while recording.
-enum NativeForegroundMode {
-  /// The SDK runs its own foreground service with a default notification
-  /// (distance and a chronometer). Survives the Flutter engine.
-  builtIn,
-
-  /// A third-party presenter (for example a live-activity plugin) owns a
-  /// foreground service. The SDK starts none. Ignored on iOS.
-  external,
+  /// The sensor reported a runtime error (see `NativeSnapshot.error`).
+  failed,
 }
 
 /// One raw location reading, exactly as the platform produced it. No filter,
@@ -147,6 +143,8 @@ class EngineConfig {
     required this.stopRadiusMeters,
     required this.stopMinDwellMs,
     required this.initialStrideMeters,
+    required this.pdrTrustedWhenCalibrated,
+    required this.recoveryStepEvidenceAfterMs,
   });
 
   double maxAccuracyMeters;
@@ -172,6 +170,14 @@ class EngineConfig {
   /// Metres per step to start from; zero or negative = none. Without a stride a
   /// step count is not turned into a distance estimate until GPS taught one.
   double initialStrideMeters;
+
+  /// Credit a calibrated step estimate for a long or curved gap as ESTIMATED
+  /// distance (opt-in). See `PdrPolicy.trustedWhenCalibrated`.
+  bool pdrTrustedWhenCalibrated;
+
+  /// A GPS gap at least this long in which the step sensor measured no steps is
+  /// credited 0 m; zero or negative disables the rule.
+  int recoveryStepEvidenceAfterMs;
 }
 
 class StartConfig {
@@ -188,7 +194,6 @@ class StartConfig {
     required this.batterySaver,
     required this.stepsEnabled,
     required this.initialSteps,
-    required this.foregroundMode,
   });
 
   /// Count steps natively (Android `TYPE_STEP_COUNTER`, iOS `CMPedometer`) and
@@ -200,9 +205,6 @@ class StartConfig {
   /// Session steps to restore after a process death (the device counter is never
   /// added to it); 0 for a new session.
   int initialSteps;
-
-  /// Android only: who holds the foreground service (see [NativeForegroundMode]).
-  NativeForegroundMode foregroundMode;
 
   /// How the native engine measures distance.
   EngineConfig engine;
@@ -253,6 +255,11 @@ class NativeDistance {
     required this.lastAcceptedFixAtMs,
     required this.steps,
     required this.strideMeters,
+    required this.activeTimeMs,
+    required this.bridgedGapMs,
+    required this.uncreditedGapMs,
+    required this.uncreditedGaps,
+    required this.ambiguousSteps,
   });
 
   NativeGpsQuality quality;
@@ -271,7 +278,8 @@ class NativeDistance {
   /// Doppler speed of the latest accepted fix; negative = unknown.
   double speedMps;
 
-  /// Measurement time of the latest accepted fix; negative = none yet.
+  /// Wall-clock time (epoch ms) of the latest accepted fix; negative = none yet.
+  /// Estimated from the monotonic measurement time at snapshot time.
   int lastAcceptedFixAtMs;
 
   /// Accepted steps of the session (zero without a step sensor).
@@ -279,6 +287,20 @@ class NativeDistance {
 
   /// Learned or configured metres per step; negative = unknown.
   double strideMeters;
+
+  /// Workout time: the running legs only, pauses excluded.
+  int activeTimeMs;
+
+  /// Time of GPS gaps that were credited (bridge or estimate).
+  int bridgedGapMs;
+
+  /// Time of GPS gaps and unmeasured intervals that were NOT credited: reported,
+  /// never hidden.
+  int uncreditedGapMs;
+  int uncreditedGaps;
+
+  /// Steps measured in a batch that straddles a GPS-quality change: used for nothing.
+  int ambiguousSteps;
 }
 
 class NativeSnapshot {
@@ -289,6 +311,8 @@ class NativeSnapshot {
     required this.updatedAtMs,
     required this.distance,
     required this.stepsStatus,
+    required this.stepsFinal,
+    required this.journalPending,
     this.sessionId,
     this.lastFixTimeMs,
     this.error,
@@ -296,6 +320,16 @@ class NativeSnapshot {
 
   /// State of the native step sensor.
   NativeStepsStatus stepsStatus;
+
+  /// Events accepted by the engine that are NOT on disk yet (queued for the
+  /// journal writer). Zero means everything shown here is durable; a crash while
+  /// this is above zero can lose that many of the latest events.
+  int journalPending;
+
+  /// True when the step total is final: after `stop`, the platform's exact count
+  /// for the closed segment was obtained (or there is no step sensor). False
+  /// means the total is the live count, which may still be corrected.
+  bool stepsFinal;
 
   String? sessionId;
   NativeTrackingState state;
@@ -371,9 +405,14 @@ abstract class TrackingHostApi {
   @async
   List<NativeFix> readPersistedFixes(String sessionId, int afterSeq);
 
-  /// Deletes the persisted fixes of [sessionId] (they hold coordinates).
+  /// Deletes the persisted journal of [sessionId] (it holds coordinates). Waits for
+  /// the writer first, so nothing re-creates the file afterwards.
   @async
   void clearSession(String sessionId);
+
+  /// The ids of the sessions persisted on this device (for recovery after a kill).
+  @async
+  List<String> listSessions();
 }
 
 @EventChannelApi()

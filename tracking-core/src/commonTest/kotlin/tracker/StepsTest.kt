@@ -246,6 +246,7 @@ class BridgeStepsTest {
         minStepMeters = 2.0, accuracyNoiseFactor = 0.5, stationarySpeedMps = 0.4, maxBridgeMs = 120_000,
         reanchorAfterRejects = 3, rejectMock = true, pdrEnabled = true, pdrConfirmRatio = 0.5,
         kalman = false, stopRadiusMeters = 15.0, stopMinDwellMs = 30_000, initialStrideMeters = stride,
+        pdrTrustedWhenCalibrated = false, recoveryStepEvidenceAfterMs = 30_000,
         adaptiveSampling = false, batterySaver = false,
     )
 
@@ -253,8 +254,8 @@ class BridgeStepsTest {
         val b = bridge(stride = 1.0).also { it.start("s", BASE_MS, 0) }
         b.onFix("s", 0, 0, ms(0.0), 10.0, 106.0, 5.0, 3.0, -1.0, false, ms(0.0), false)
         assertEquals(3, b.onTick(ms(15.0)))
-        b.onStepCounter(0, ms(16.0), 70_000) // baseline
-        b.onStepCounter(0, ms(20.0), 70_025)
+        b.onStepCounter(0, ms(16.0), ms(16.0), 70_000) // baseline
+        b.onStepCounter(0, ms(20.0), ms(20.0), 70_025)
         val s = b.snapshot()
         assertEquals(25, s.steps)
         near(25.0, s.pendingPdrMeters, 1e-9)
@@ -268,17 +269,17 @@ class BridgeStepsTest {
 
     @Test fun restoredStepsSurviveAndPauseResumeKeepTheTotal() {
         val b = bridge().also { it.start("s", BASE_MS, 0, initialSteps = 500) }
-        b.onStepCounter(0, ms(1.0), 100); b.onStepCounter(0, ms(2.0), 130)
+        b.onStepCounter(0, ms(1.0), ms(1.0), 100); b.onStepCounter(0, ms(2.0), ms(2.0), 130)
         b.pause(ms(3.0))
         b.resume(ms(60.0), 1)
-        b.onStepCounter(1, ms(61.0), 900) // walked while paused: baseline only
-        b.onStepCounter(1, ms(62.0), 910)
+        b.onStepCounter(1, ms(61.0), ms(61.0), 900) // walked while paused: baseline only
+        b.onStepCounter(1, ms(62.0), ms(62.0), 910)
         assertEquals(540, b.snapshot().steps)
     }
 
     @Test fun iosStyleExactCloseCorrectsTheTotalOnly() {
         val b = bridge().also { it.start("s", BASE_MS, 0) }
-        b.onSegmentSteps(0, ms(1.0), 30)
+        b.onSegmentSteps(0, ms(1.0), ms(1.0), 30)
         b.pause(ms(2.0))
         b.correctClosedSegment(34)
         assertEquals(34, b.snapshot().steps)

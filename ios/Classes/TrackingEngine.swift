@@ -3,17 +3,18 @@ import Darwin
 import Foundation
 import TrackingCore
 
-/// Builds the shared Kotlin core from the channel's `EngineConfig`.
-func makeCoreBridge(_ e: EngineConfig, adaptiveSampling: Bool, batterySaver: Bool) -> TrackingCoreBridge {
-    TrackingCoreBridge(
-        maxAccuracyMeters: e.maxAccuracyMeters, maxFixAgeMs: e.maxFixAgeMs,
-        silenceAfterMs: e.silenceAfterMs, maxSpeedMps: e.maxSpeedMps, minStepMeters: e.minStepMeters,
-        accuracyNoiseFactor: e.accuracyNoiseFactor, stationarySpeedMps: e.stationarySpeedMps,
-        maxBridgeMs: e.maxBridgeMs, reanchorAfterRejects: Int32(e.reanchorAfterRejects),
-        rejectMock: e.rejectMock, pdrEnabled: e.pdrEnabled, pdrConfirmRatio: e.pdrConfirmRatio,
-        kalman: e.kalman, stopRadiusMeters: e.stopRadiusMeters, stopMinDwellMs: e.stopMinDwellMs,
-        initialStrideMeters: e.initialStrideMeters,
-        adaptiveSampling: adaptiveSampling, batterySaver: batterySaver)
+/// The engine configuration the app sent, as the primitives the core stores in the journal header.
+func makeSettings(_ e: EngineConfig, adaptiveSampling: Bool, batterySaver: Bool) -> BridgeSettings {
+    BridgeSettings(
+        maxAccuracyMeters: e.maxAccuracyMeters, maxFixAgeMs: e.maxFixAgeMs, silenceAfterMs: e.silenceAfterMs,
+        maxSpeedMps: e.maxSpeedMps, minStepMeters: e.minStepMeters, accuracyNoiseFactor: e.accuracyNoiseFactor,
+        stationarySpeedMps: e.stationarySpeedMps, maxBridgeMs: e.maxBridgeMs,
+        reanchorAfterRejects: Int32(e.reanchorAfterRejects), rejectMock: e.rejectMock, pdrEnabled: e.pdrEnabled,
+        pdrConfirmRatio: e.pdrConfirmRatio, kalman: e.kalman, stopRadiusMeters: e.stopRadiusMeters,
+        stopMinDwellMs: e.stopMinDwellMs, initialStrideMeters: e.initialStrideMeters,
+        pdrTrustedWhenCalibrated: e.pdrTrustedWhenCalibrated,
+        recoveryStepEvidenceAfterMs: e.recoveryStepEvidenceAfterMs, adaptiveSampling: adaptiveSampling,
+        batterySaver: batterySaver)
 }
 
 /// The monotonic clock the core runs on, in ms. `CLOCK_MONOTONIC` also counts
@@ -22,23 +23,26 @@ func makeCoreBridge(_ e: EngineConfig, adaptiveSampling: Bool, batterySaver: Boo
 /// reorder or age a fix.
 func monotonicNowMs() -> Int64 { Int64(clock_gettime_nsec_np(CLOCK_MONOTONIC) / 1_000_000) }
 
-/// Collects raw fixes for one session at a time, persists them, and feeds the
-/// shared Kotlin distance engine (`GpsDistanceEngine` through
-/// `TrackingCoreBridge`).
+/// Collects raw fixes and steps for one session at a time and feeds them to the shared Kotlin core
+/// through a `SessionRecorder`, which writes every input to a journal BEFORE applying it.
 ///
-///  - All state, including the core (which is not thread-safe), lives on `queue`;
-///    every public call hops there.
+///  - All state, including the core (which is not thread-safe), lives on `queue`; every public call hops there.
 ///  - Results, fixes and snapshots are delivered on the MAIN thread.
-///  - Disk writes run on `storeQueue`, one fix at a time, in order.
+///  - The journal has ONE writer (`FileJournalSink`); `stop`, `readPersisted` and `clearSession` first
+///    wait for it to reach the disk (flush barrier).
+///  - Every asynchronous callback is checked against the session it belongs to: step readings by a
+///    generation, the exact-steps correction by the (session token, segment) captured when the segment
+///    was closed, so a late answer can never touch a newer session.
+///  - `stop` answers only after the exact step count was obtained (or failed or timed out, which is
+///    reported with a stable code and `stepsFinal == false`) and the journal is durable: its result is final.
 ///  - A failure is never swallowed: it is logged and surfaced in the snapshot.
 ///
-/// It outlives the Flutter engine on purpose: if the engine detaches, native
-/// keeps recording AND keeps computing the distance.
+/// It outlives the Flutter engine on purpose: if the engine detaches, native keeps recording AND keeps
+/// computing the distance.
 final class TrackingEngine: LocationProviderDelegate {
     private let provider: LocationProviding
-    private let store: FixStoring
+    private let store: JournalStoring
     private let steps: StepProviding
-    private let coreFactory: (EngineConfig, Bool, Bool) -> TrackingCoreBridge
     private let monotonicMs: () -> Int64
     private let wallNow: () -> Date
     private let queue = DispatchQueue(label: "com.uprace.flutter_tracking_gps.engine", qos: .userInitiated)
@@ -50,7 +54,8 @@ final class TrackingEngine: LocationProviderDelegate {
     var snapshotObserver: ((NativeSnapshot) -> Void)?
 
     // State, only touched on `queue`.
-    private var core: TrackingCoreBridge?
+    private var recorder: SessionRecorder?
+    private var sink: DurableSink?
     private var tickTimer: DispatchSourceTimer?
     private var sessionId: String?
     private var state: NativeTrackingState = .idle
@@ -61,26 +66,34 @@ final class TrackingEngine: LocationProviderDelegate {
     private var lastError: String?
     private var minDistanceMeters: Double = 0
     private var adaptive = false
-    private var stepsEnabled = false
-    private var stepsStatus: NativeStepsStatus = .off
-    private var stepSegmentStart: Date?
-    /// Bumped whenever the step subscription ends, so a reading queued before it cannot reach a later segment.
-    private var stepGeneration = 0
+    private var extras: [String: String] = [:]
+    private var legStartMono: Int64 = 0
     private var permissionWaiters: [(NativePermission) -> Void] = []
 
+    // Steps.
+    private var stepsEnabled = false
+    private var stepsStatus: NativeStepsStatus = .off
+    private var stepsEverActive = false
+    private var stepSegmentStart: Date?
+    /// Bumped whenever the live step subscription ends, so a reading queued before it cannot reach a later segment.
+    private var stepGeneration = 0
+    /// Identity of the session: bumped at every start and restore. A late correction carries it.
+    private var sessionToken = 0
+    private var stepCloseInFlight = false
+    private var lastCloseExact = false
+    private var stepCloseWaiters: [() -> Void] = []
+
+    static let exactStepsTimeout: TimeInterval = 3
+
     init(
-        provider: LocationProviding, store: FixStoring,
+        provider: LocationProviding, store: JournalStoring,
         steps: StepProviding = CoreMotionStepProvider(),
-        coreFactory: @escaping (EngineConfig, Bool, Bool) -> TrackingCoreBridge = {
-            makeCoreBridge($0, adaptiveSampling: $1, batterySaver: $2)
-        },
         monotonicMs: @escaping () -> Int64 = monotonicNowMs,
         wallNow: @escaping () -> Date = Date.init
     ) {
         self.provider = provider
         self.store = store
         self.steps = steps
-        self.coreFactory = coreFactory
         self.monotonicMs = monotonicMs
         self.wallNow = wallNow
         provider.delegate = self
@@ -122,7 +135,7 @@ final class TrackingEngine: LocationProviderDelegate {
 
     /// Coordinate-free timeline of what the core decided.
     func report() -> String {
-        queue.sync { core?.report() ?? "" }
+        queue.sync { recorder?.report() ?? "" }
     }
 
     func start(config: StartConfig, completion: @escaping (Result<NativeSnapshot, Error>) -> Void) {
@@ -130,21 +143,46 @@ final class TrackingEngine: LocationProviderDelegate {
             guard let self = self else { return }
             if self.state == .running { self.provider.stopUpdates() }
             self.stopTicker()
+            self.endSteps()
+            self.sessionToken += 1
+            // A fresh journal: a new start must never be mixed with an old one of the same id.
+            do {
+                try self.store.clear(config.sessionId)
+            } catch {
+                self.deliver(
+                    .failure(trackingError(
+                        code: TrackingErrorCode.startFailed, message: "could not prepare the journal",
+                        underlying: error)),
+                    to: completion)
+                return
+            }
+            let sink = self.store.open(config.sessionId)
+            let newExtras = [
+                "intervalMs": String(config.intervalMs), "minDistanceMeters": String(config.minDistanceMeters),
+                "stepsEnabled": String(config.stepsEnabled),
+            ]
+            let now = self.monotonicMs()
+            let recorder = SessionRecorder.Companion.shared.start(
+                sink: sink,
+                settings: makeSettings(config.engine, adaptiveSampling: config.adaptiveSampling, batterySaver: config.batterySaver),
+                sessionId: config.sessionId, atMs: now, wallAtMs: self.wallMs(self.wallNow()),
+                segmentId: Int32(config.startSegmentId), initialSteps: config.initialSteps, extras: newExtras)
+            self.recorder = recorder
+            self.sink = sink
             self.sessionId = config.sessionId
             self.seq = config.startSeq
             self.segmentId = config.startSegmentId
             self.fixCount = 0
             self.lastFixTimeMs = nil
             self.lastError = nil
+            self.extras = newExtras
             self.minDistanceMeters = config.minDistanceMeters
             self.adaptive = config.adaptiveSampling
             self.stepsEnabled = config.stepsEnabled
-            self.endSteps()
-            let bridge = self.coreFactory(config.engine, config.adaptiveSampling, config.batterySaver)
-            bridge.start(
-                sessionId: config.sessionId, atMs: self.monotonicMs(), segmentId: Int32(config.startSegmentId),
-                initialSteps: config.initialSteps)
-            self.core = bridge
+            self.stepsStatus = .off
+            self.stepsEverActive = false
+            self.lastCloseExact = false
+            self.legStartMono = now
             guard self.provider.permission == .granted else {
                 self.state = .permissionDenied
                 self.publish()
@@ -188,8 +226,8 @@ final class TrackingEngine: LocationProviderDelegate {
                 self.provider.stopUpdates()
                 self.stopTicker()
                 self.state = .paused
-                self.core?.pause(atMs: self.monotonicMs())
-                self.closeStepSegment()
+                self.recorder?.pause(atMs: self.monotonicMs())
+                self.closeStepSegment(completion: nil)
                 self.publish()
             }
             self.deliver(.success(self.makeSnapshot()), to: completion)
@@ -205,7 +243,8 @@ final class TrackingEngine: LocationProviderDelegate {
             }
             do {
                 self.segmentId += 1
-                self.core?.resume(atMs: self.monotonicMs(), segmentId: Int32(self.segmentId))
+                self.recorder?.resume(atMs: self.monotonicMs(), segmentId: Int32(self.segmentId))
+                self.legStartMono = self.monotonicMs()
                 try self.provider.startUpdates(minDistanceMeters: self.minDistanceMeters)
                 self.state = .running
                 self.startTicker()
@@ -225,88 +264,138 @@ final class TrackingEngine: LocationProviderDelegate {
         }
     }
 
+    /// Finishes the session. Answers only after the exact step count is in (or failed, or timed out) and
+    /// the journal is durable, so the returned snapshot is final.
     func stop(sessionId id: String, completion: @escaping (Result<NativeSnapshot, Error>) -> Void) {
         queue.async { [weak self] in
             guard let self = self else { return }
-            if id == self.sessionId, self.state != .idle, self.state != .stopped {
-                self.provider.stopUpdates()
-                self.stopTicker()
-                self.state = .stopped
-                self.core?.finish(atMs: self.monotonicMs())
-                self.closeStepSegment()
-                self.publish()
+            guard id == self.sessionId, self.state != .idle, self.state != .stopped, self.state != .finishing else {
+                self.deliver(.success(self.makeSnapshot()), to: completion)
+                return
             }
-            self.deliver(.success(self.makeSnapshot()), to: completion)
+            let wasRunning = self.state == .running
+            self.provider.stopUpdates()
+            self.stopTicker()
+            // FINISHING until the exact step count is in and the journal is durable: nothing published
+            // meanwhile may pass for a final result.
+            self.state = .finishing
+            self.recorder?.finish(atMs: self.monotonicMs())
+            let token = self.sessionToken
+            let finalize: () -> Void = { [weak self] in
+                guard let self = self, token == self.sessionToken else { return }
+                let recorder = self.recorder
+                self.storeQueue.async { [weak self] in
+                    recorder?.flush()
+                    self?.queue.async { [weak self] in
+                        guard let self = self else { return }
+                        self.state = .stopped
+                        self.publish()
+                        self.deliver(.success(self.makeSnapshot()), to: completion)
+                    }
+                }
+            }
+            if wasRunning {
+                self.closeStepSegment(completion: finalize)
+            } else {
+                self.afterStepClose(finalize)  // paused: its close may still be in flight
+            }
         }
     }
 
-    /// A step estimate for `segmentId`: held as pending until the GPS that returns
-    /// confirms it. One that belongs to another segment (a late estimate after a
-    /// resume) is refused by the core.
+    /// A step estimate for `segmentId` from the app's own source: held as pending until the GPS that
+    /// returns confirms it. One that belongs to another segment is refused by the core.
     func submitPdr(sessionId id: String, segmentId segment: Int64, meters: Double) {
         queue.async { [weak self] in
-            guard let self = self, id == self.sessionId else { return }
-            self.core?.submitPdr(segmentId: Int32(segment), atMs: self.monotonicMs(), meters: meters)
+            guard let self = self, id == self.sessionId, self.state == .running else { return }
+            self.recorder?.submitPdr(segmentId: Int32(segment), atMs: self.monotonicMs(), meters: meters)
             self.publish()
         }
     }
 
-    /// After a process death: rebuilds the core by replaying the persisted fixes
-    /// (segments are never joined) and leaves the session PAUSED. If this session
-    /// already runs, nothing is replayed.
+    /// After a process death: replays the session's journal (with the configuration stored in ITS header,
+    /// not the one the app passes now) and leaves the session PAUSED. A damaged last record is dropped and
+    /// the journal repaired so new records can be appended; damage in the middle keeps only the intact part
+    /// and says so in the snapshot. If this session already runs, nothing is replayed.
     func restore(config: StartConfig, completion: @escaping (Result<NativeSnapshot, Error>) -> Void) {
         storeQueue.async { [weak self] in
             guard let self = self else { return }
-            let persisted: [NativeFix]
+            let lines: [String]
             do {
-                persisted = try self.store.read(sessionId: config.sessionId, afterSeq: -1)
+                lines = try self.store.read(config.sessionId)
             } catch {
                 self.deliver(
                     .failure(trackingError(
-                        code: TrackingErrorCode.restoreFailed,
-                        message: "could not restore the session", underlying: error)),
+                        code: TrackingErrorCode.restoreFailed, message: "could not read the journal",
+                        underlying: error)),
                     to: completion)
                 return
             }
-            self.queue.async {
+            self.queue.async { [weak self] in
+                guard let self = self else { return }
                 let running = self.state == .running || self.state == .paused
                 if config.sessionId == self.sessionId, running {
                     self.deliver(.success(self.makeSnapshot()), to: completion)
                     return
                 }
                 self.stopTicker()
-                let bridge = self.coreFactory(config.engine, config.adaptiveSampling, config.batterySaver)
-                var segment = persisted.first?.segmentId ?? config.startSegmentId
-                var lastSeq: Int64 = -1
-                bridge.start(
-                    sessionId: config.sessionId, atMs: persisted.first?.elapsedMs ?? self.monotonicMs(),
-                    segmentId: Int32(segment), initialSteps: config.initialSteps)
-                for fix in persisted {
-                    if fix.segmentId != segment {
-                        bridge.pause(atMs: fix.elapsedMs)
-                        bridge.resume(atMs: fix.elapsedMs, segmentId: Int32(fix.segmentId))
-                        segment = fix.segmentId
-                    }
-                    _ = bridge.onFix(
-                        sessionId: fix.sessionId, segmentId: Int32(fix.segmentId), seq: fix.seq,
-                        timeMs: fix.elapsedMs, latitude: fix.latitude, longitude: fix.longitude,
-                        horizontalAccuracy: fix.horizontalAccuracy, speed: fix.speed,
-                        speedAccuracy: fix.speedAccuracy, isMock: fix.isMock,
-                        nowMs: fix.elapsedMs, replay: true)
-                    lastSeq = max(lastSeq, fix.seq)
+                self.endSteps()
+                if self.state == .running { self.provider.stopUpdates() }
+                let contents = JournalCodec.shared.read(lines: lines)
+                guard let header = contents.records.first as? JournalRecord.Header else {
+                    self.deliver(
+                        .failure(trackingError(
+                            code: TrackingErrorCode.restoreFailed,
+                            message: "no usable journal for this session (\(contents.status))")),
+                        to: completion)
+                    return
                 }
-                bridge.pause(atMs: self.monotonicMs())
-                self.core = bridge
-                self.sessionId = config.sessionId
-                self.adaptive = config.adaptiveSampling
-                self.stepsEnabled = config.stepsEnabled
+                let usable = Array(lines.filter { !$0.isEmpty }.prefix(contents.records.count))
+                if contents.status != .ok {
+                    // Only a damaged LAST record is a normal crash artefact; damage in the middle drops
+                    // everything after it, so the original is kept next to the repaired file.
+                    do { try self.store.rewrite(config.sessionId, lines: usable, keepBackup: contents.status != .truncatedTail) } catch {
+                        self.deliver(
+                            .failure(trackingError(
+                                code: TrackingErrorCode.restoreFailed, message: "could not repair the journal",
+                                underlying: error)),
+                            to: completion)
+                        return
+                    }
+                }
+                let sink = self.store.open(config.sessionId)
+                let result = SessionRecorder.Companion.shared.restore(sink: sink, lines: usable)
+                guard let recorder = result.recorder else {
+                    self.deliver(
+                        .failure(trackingError(
+                            code: TrackingErrorCode.restoreFailed, message: "journal replay failed (\(result.status))")),
+                        to: completion)
+                    return
+                }
+                self.sessionToken += 1
+                self.recorder = recorder
+                self.sink = sink
+                self.sessionId = result.sessionId
+                self.seq = result.nextSeq
+                self.segmentId = Int64(result.segmentId)
+                self.fixCount = Int64(result.fixCount)
+                self.lastFixTimeMs = result.lastFixWallMs >= 0 ? result.lastFixWallMs : nil
+                self.extras = result.extras
+                self.adaptive = header.settings.adaptiveSampling
+                self.stepsEnabled = result.extras["stepsEnabled"] == "true"
                 self.stepsStatus = .off
-                self.minDistanceMeters = config.minDistanceMeters
-                self.segmentId = segment
-                self.seq = lastSeq + 1
-                self.fixCount = Int64(persisted.count)
-                self.lastFixTimeMs = persisted.last?.timeMs
-                self.lastError = nil
+                self.stepsEverActive = false
+                self.lastCloseExact = false
+                self.minDistanceMeters = Double(result.extras["minDistanceMeters"] ?? "") ?? config.minDistanceMeters
+                if result.engineChanged {
+                    self.lastError = "\(TrackingErrorCode.engineChanged): the journal was recorded with engine \(result.engineVersion); the replay may differ from what was shown live"
+                }
+                switch contents.status {
+                case .ok: if !result.engineChanged { self.lastError = nil }
+                case .truncatedTail:
+                    self.lastError = "\(TrackingErrorCode.journalRepaired): the last record was incomplete and was dropped"
+                default:
+                    self.lastError = "\(TrackingErrorCode.journalCorrupt): damage at line \(contents.damagedLine); only the intact part was restored"
+                }
                 self.state = .paused
                 self.publish()
                 self.deliver(.success(self.makeSnapshot()), to: completion)
@@ -316,13 +405,17 @@ final class TrackingEngine: LocationProviderDelegate {
 
     // MARK: - Persistence
 
+    /// The persisted fixes (after the writer reached the disk), oldest first.
     func readPersisted(
         sessionId: String, afterSeq: Int64, completion: @escaping (Result<[NativeFix], Error>) -> Void
     ) {
         storeQueue.async { [weak self] in
             guard let self = self else { return }
             do {
-                let fixes = try self.store.read(sessionId: sessionId, afterSeq: afterSeq)
+                let lines = try self.store.read(sessionId)
+                let fixes = SessionRecorder.Companion.shared.fixes(lines: lines)
+                    .filter { $0.seq > afterSeq }
+                    .map { Self.nativeFix($0) }
                 self.deliver(.success(fixes), to: completion)
             } catch {
                 self.deliver(
@@ -334,17 +427,48 @@ final class TrackingEngine: LocationProviderDelegate {
         }
     }
 
+    /// Deletes the journal. The writer is closed and drained first, so nothing re-creates the file. A
+    /// session that is still open cannot be cleared.
     func clearSession(_ sessionId: String, completion: @escaping (Result<Void, Error>) -> Void) {
+        queue.async { [weak self] in
+            guard let self = self else { return }
+            if sessionId == self.sessionId, self.state == .running || self.state == .paused || self.state == .finishing {
+                self.deliver(
+                    .failure(trackingError(
+                        code: TrackingErrorCode.sessionOpen, message: "finish the session before clearing it")),
+                    to: completion)
+                return
+            }
+            if sessionId == self.sessionId {
+                self.recorder = nil
+                self.sink = nil
+            }
+            self.storeQueue.async { [weak self] in
+                guard let self = self else { return }
+                do {
+                    try self.store.clear(sessionId)
+                    self.deliver(.success(()), to: completion)
+                } catch {
+                    self.deliver(
+                        .failure(trackingError(
+                            code: TrackingErrorCode.storeClearFailed,
+                            message: "could not clear the session", underlying: error)),
+                        to: completion)
+                }
+            }
+        }
+    }
+
+    func listSessions(completion: @escaping (Result<[String], Error>) -> Void) {
         storeQueue.async { [weak self] in
             guard let self = self else { return }
             do {
-                try self.store.clearSession(sessionId)
-                self.deliver(.success(()), to: completion)
+                self.deliver(.success(try self.store.list()), to: completion)
             } catch {
                 self.deliver(
                     .failure(trackingError(
-                        code: TrackingErrorCode.storeClearFailed,
-                        message: "could not clear the session", underlying: error)),
+                        code: TrackingErrorCode.storeListFailed, message: "could not list the sessions",
+                        underlying: error)),
                     to: completion)
             }
         }
@@ -353,30 +477,42 @@ final class TrackingEngine: LocationProviderDelegate {
     // MARK: - LocationProviderDelegate
 
     func locationProvider(_ provider: LocationProviding, didUpdate locations: [CLLocation]) {
-        // The arrival clocks are read HERE, in the callback, not later on the
-        // queue: that is the moment the fix reached us.
+        // The arrival clocks are read HERE, in the callback, not later on the queue: that is the
+        // moment the fix reached us.
         let arrivalMono = monotonicMs()
         let arrivalWall = wallNow()
         queue.async { [weak self] in
-            guard let self = self, self.state == .running, let id = self.sessionId else { return }
+            guard let self = self, self.state == .running, let id = self.sessionId, let recorder = self.recorder
+            else { return }
             for location in locations {
-                // A negative horizontal accuracy means CoreLocation says the
-                // coordinate itself is invalid.
+                // A negative horizontal accuracy means CoreLocation says the coordinate itself is invalid.
                 guard location.horizontalAccuracy >= 0 else { continue }
-                let fix = self.makeFix(
-                    sessionId: id, location: location, arrivalMono: arrivalMono, arrivalWall: arrivalWall)
+                let ageMs = Int64((arrivalWall.timeIntervalSince(location.timestamp) * 1000).rounded())
+                let elapsedMs = arrivalMono - ageMs
+                // Measured before this leg started: it belongs to an earlier segment (a callback queued
+                // before a pause), never to this one.
+                guard elapsedMs >= self.legStartMono else { continue }
+                let n = self.seq
                 self.seq += 1
                 self.fixCount += 1
-                self.lastFixTimeMs = fix.timeMs
-                _ = self.core?.onFix(
-                    sessionId: fix.sessionId, segmentId: Int32(fix.segmentId), seq: fix.seq,
-                    timeMs: fix.elapsedMs, latitude: fix.latitude, longitude: fix.longitude,
-                    horizontalAccuracy: fix.horizontalAccuracy, speed: fix.speed,
-                    speedAccuracy: fix.speedAccuracy, isMock: fix.isMock,
-                    nowMs: arrivalMono, replay: false)
-                self.persist(fix)
+                self.lastFixTimeMs = Int64(location.timestamp.timeIntervalSince1970 * 1000)
+                var mock = false
+                if #available(iOS 15.0, *) { mock = location.sourceInformation?.isSimulatedBySoftware ?? false }
+                _ = recorder.onFix(
+                    sessionId: id, segmentId: Int32(self.segmentId), seq: n, timeMs: elapsedMs,
+                    wallTimeMs: Int64(location.timestamp.timeIntervalSince1970 * 1000),
+                    latitude: location.coordinate.latitude, longitude: location.coordinate.longitude,
+                    horizontalAccuracy: location.horizontalAccuracy,
+                    speed: location.speed < 0 ? -1 : location.speed,
+                    speedAccuracy: location.speedAccuracy < 0 ? -1 : location.speedAccuracy,
+                    course: location.course < 0 ? -1 : location.course,
+                    altitude: location.verticalAccuracy < 0 ? 0 : location.altitude,
+                    verticalAccuracy: location.verticalAccuracy < 0 ? -1 : location.verticalAccuracy,
+                    provider: "gps", isMock: mock, nowMs: arrivalMono)
+                let fix = Self.nativeFix(
+                    id: id, segment: self.segmentId, seq: n, location: location, elapsedMs: elapsedMs, mock: mock)
                 DispatchQueue.main.async { [weak self] in self?.fixObserver?(fix) }
-                if self.adaptive, let plan = self.core?.samplingPlan(nowMs: arrivalMono) {
+                if self.adaptive, let plan = recorder.lastPlan {
                     // iOS has no interval request: only the displacement filter moves.
                     if plan.minDistanceMeters != self.minDistanceMeters {
                         self.minDistanceMeters = plan.minDistanceMeters
@@ -419,47 +555,49 @@ final class TrackingEngine: LocationProviderDelegate {
         }
     }
 
-    // MARK: - Private (queue)
-
-    /// A 1 Hz tick: lets the core notice GPS silence and refreshes the snapshot.
-    private func startTicker() {
-        stopTicker()
-        let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now() + 1, repeating: 1)
-        timer.setEventHandler { [weak self] in
-            guard let self = self else { return }
-            _ = self.core?.onTick(nowMs: self.monotonicMs())
-            self.publish()
-        }
-        timer.resume()
-        tickTimer = timer
-    }
-
-    private func stopTicker() {
-        tickTimer?.cancel()
-        tickTimer = nil
-    }
-
     // MARK: - Steps (queue)
 
-    /// Starts counting steps for the segment that just opened. A missing sensor or
-    /// permission only sets `stepsStatus`: the recording goes on.
+    /// Starts counting steps for the segment that just opened. A missing sensor, permission or setup
+    /// only sets `stepsStatus` and `lastError` with a stable code: the recording goes on.
     private func beginSteps() {
         guard stepsEnabled else {
             stepsStatus = .off
             return
         }
-        stepsStatus = steps.status
-        guard stepsStatus == .active else { return }
+        if case .failure(let error) = steps.availability() {
+            stepsStatus = Self.status(for: error)
+            lastError = "\(error.code): \(error.message)"
+            recorder?.setStepSensorActive(active: false)
+            return
+        }
+        stepsStatus = .active
+        stepsEverActive = true
+        recorder?.setStepSensorActive(active: true)
         stepGeneration += 1
         let generation = stepGeneration
         let segment = Int32(segmentId)
         let start = wallNow()
         stepSegmentStart = start
-        steps.startUpdates(from: start) { [weak self] count in
+        steps.startUpdates(from: start) { [weak self] result in
+            // Both clocks are read in the callback: that is when the reading reached us.
+            let arrivalMono = monotonicNowMs()
+            let arrivalWall = Date()
             self?.queue.async { [weak self] in
                 guard let self = self, generation == self.stepGeneration, self.state == .running else { return }
-                _ = self.core?.onSegmentSteps(segmentId: segment, atMs: self.monotonicMs(), segmentSteps: count)
+                switch result {
+                case .success(let reading):
+                    // The data's own end date is when the steps were measured.
+                    let ageMs = Int64((arrivalWall.timeIntervalSince(reading.endDate) * 1000).rounded())
+                    let measured = arrivalMono - max(0, ageMs)
+                    self.recorder?.onSegmentSteps(
+                        segmentId: segment, measuredAtMs: measured, deliveredAtMs: arrivalMono, count: reading.count)
+                case .failure(let error):
+                    // A runtime failure (for example access revoked) is reported, never swallowed.
+                    self.stepsStatus = Self.status(for: error)
+                    self.lastError = "\(error.code): \(error.message)"
+                    self.recorder?.setStepSensorActive(active: false)
+                    self.steps.stopUpdates()
+                }
                 self.publish()
             }
         }
@@ -472,37 +610,101 @@ final class TrackingEngine: LocationProviderDelegate {
         stepSegmentStart = nil
     }
 
-    /// Ends the live subscription at a pause or stop and replaces the segment's
-    /// live count with the OS's exact count up to the boundary. The result only
-    /// corrects the displayed total, never distance, and is dropped when another
-    /// segment has been closed meanwhile.
-    private func closeStepSegment() {
+    /// Runs `block` once no step close is in flight (immediately when none is).
+    private func afterStepClose(_ block: @escaping () -> Void) {
+        if stepCloseInFlight {
+            stepCloseWaiters.append(block)
+        } else {
+            block()
+        }
+    }
+
+    /// Ends the live subscription at a pause or stop and replaces the segment's live count with the OS's
+    /// exact count up to the boundary. The answer carries the identity captured NOW (session token and
+    /// segment): it is dropped when another session or segment is current. It only corrects the displayed
+    /// total, never distance. `completion` runs on `queue` once the close is settled (exact, failed or
+    /// timed out); nil for a pause, which does not wait.
+    private func closeStepSegment(completion: (() -> Void)?) {
         let start = stepSegmentStart
+        let token = sessionToken
         let closedSegment = segmentId
         let boundary = wallNow()
         endSteps()
-        guard stepsEnabled, stepsStatus == .active, let start = start else { return }
-        steps.query(from: start, to: boundary) { [weak self] exact in
+        guard stepsEnabled, stepsStatus == .active, let start = start else {
+            completion?()
+            return
+        }
+        stepCloseInFlight = true
+        lastCloseExact = false
+        steps.query(from: start, to: boundary, timeout: Self.exactStepsTimeout) { [weak self] result in
             self?.queue.async { [weak self] in
-                guard let self = self, let exact = exact, self.segmentId == closedSegment,
-                    self.state != .running
-                else { return }
-                self.core?.correctClosedSegment(exactSteps: exact)
-                self.publish()
+                guard let self = self else { return }
+                if token == self.sessionToken, self.segmentId == closedSegment {
+                    switch result {
+                    case .success(let exact):
+                        self.recorder?.correctClosedSegment(exactSteps: exact)
+                        self.lastCloseExact = true
+                    case .failure(let error):
+                        // Not "0 steps": the total stays the live count and says so.
+                        self.lastError = "\(error.code): \(error.message)"
+                    }
+                    self.publish()
+                }
+                self.stepCloseInFlight = false
+                completion?()
+                let waiters = self.stepCloseWaiters
+                self.stepCloseWaiters.removeAll()
+                waiters.forEach { $0() }
             }
         }
     }
 
+    private static func status(for error: StepError) -> NativeStepsStatus {
+        switch error {
+        case .permissionDenied: return .permissionDenied
+        case .unavailable: return .unavailable
+        case .missingUsageDescription, .timeout, .failed: return .failed
+        }
+    }
+
+    // MARK: - Ticker (queue)
+
+    /// A 1 Hz tick: lets the core notice GPS silence and refreshes the snapshot.
+    private func startTicker() {
+        stopTicker()
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + 1, repeating: 1)
+        timer.setEventHandler { [weak self] in
+            guard let self = self, self.state == .running else { return }
+            _ = self.recorder?.onTick(nowMs: self.monotonicMs())
+            self.publish()
+        }
+        timer.resume()
+        tickTimer = timer
+    }
+
+    private func stopTicker() {
+        tickTimer?.cancel()
+        tickTimer = nil
+    }
+
+    // MARK: - Snapshot (queue)
+
     private func makeSnapshot() -> NativeSnapshot {
-        NativeSnapshot(
-            stepsStatus: stepsStatus,
+        var error = lastError
+        if error == nil, let failure = sink?.failure {
+            error = "\(TrackingErrorCode.storeWriteFailed): \(failure.localizedDescription)"
+        }
+        let finalSteps = state == .stopped && (lastCloseExact || !stepsEverActive)
+        return NativeSnapshot(
+            stepsStatus: stepsStatus, journalPending: Int64(sink?.pending ?? 0), stepsFinal: finalSteps,
             sessionId: sessionId, state: state, segmentId: segmentId, distance: makeDistance(),
             fixCount: fixCount, lastFixTimeMs: lastFixTimeMs,
-            updatedAtMs: Int64((wallNow().timeIntervalSince1970 * 1000).rounded()), error: lastError)
+            updatedAtMs: wallMs(wallNow()), error: error)
     }
 
     private func makeDistance() -> NativeDistance {
-        guard let s = core?.snapshot() else { return Self.emptyDistance }
+        guard let s = recorder?.snapshot() else { return Self.emptyDistance }
         let quality: NativeGpsQuality
         switch s.quality {
         case 1: quality = .good
@@ -511,36 +713,36 @@ final class TrackingEngine: LocationProviderDelegate {
         case 4: quality = .recovering
         default: quality = .unknown
         }
+        // The core measures on the monotonic clock; the app wants a calendar time.
+        let lastFixEpoch: Int64 = s.lastFixAtMs >= 0 ? wallMs(wallNow()) - (monotonicMs() - s.lastFixAtMs) : -1
         return NativeDistance(
             quality: quality, totalMeters: s.totalMeters, gpsMeters: s.gpsMeters,
             gapBridgeMeters: s.gapBridgeMeters, pdrMeters: s.pdrMeters,
             pendingPdrMeters: s.pendingPdrMeters, movingTimeMs: s.movingTimeMs, isStopped: s.isStopped,
-            speedMps: s.speedMps, lastAcceptedFixAtMs: s.lastFixAtMs, steps: s.steps,
-            strideMeters: s.strideMeters)
+            speedMps: s.speedMps, lastAcceptedFixAtMs: lastFixEpoch, steps: s.steps,
+            strideMeters: s.strideMeters, activeTimeMs: s.activeTimeMs, bridgedGapMs: s.bridgedGapMs,
+            uncreditedGapMs: s.uncreditedGapMs, uncreditedGaps: Int64(s.uncreditedGaps),
+            ambiguousSteps: s.ambiguousSteps)
     }
 
     static let emptyDistance = NativeDistance(
         quality: .unknown, totalMeters: 0, gpsMeters: 0, gapBridgeMeters: 0, pdrMeters: 0,
         pendingPdrMeters: 0, movingTimeMs: 0, isStopped: false, speedMps: -1, lastAcceptedFixAtMs: -1,
-        steps: 0, strideMeters: -1)
+        steps: 0, strideMeters: -1, activeTimeMs: 0, bridgedGapMs: 0, uncreditedGapMs: 0, uncreditedGaps: 0,
+        ambiguousSteps: 0)
 
     private func publish() {
         let snapshot = makeSnapshot()
         DispatchQueue.main.async { [weak self] in self?.snapshotObserver?(snapshot) }
     }
 
-    /// `elapsedMs` is the moment the position was measured on the monotonic clock:
-    /// the arrival time minus the fix age (the age is negative only for a clock
-    /// that is slightly off, and that must not reorder fixes either).
-    private func makeFix(
-        sessionId: String, location l: CLLocation, arrivalMono: Int64, arrivalWall: Date
+    private func wallMs(_ date: Date) -> Int64 { Int64((date.timeIntervalSince1970 * 1000).rounded()) }
+
+    private static func nativeFix(
+        id: String, segment: Int64, seq: Int64, location l: CLLocation, elapsedMs: Int64, mock: Bool
     ) -> NativeFix {
-        let ageMs = Int64((arrivalWall.timeIntervalSince(l.timestamp) * 1000).rounded())
-        let elapsedMs = arrivalMono - ageMs
-        var mock = false
-        if #available(iOS 15.0, *) { mock = l.sourceInformation?.isSimulatedBySoftware ?? false }
-        return NativeFix(
-            sessionId: sessionId, segmentId: segmentId, seq: seq,
+        NativeFix(
+            sessionId: id, segmentId: segment, seq: seq,
             timeMs: Int64(l.timestamp.timeIntervalSince1970 * 1000), elapsedMs: elapsedMs,
             latitude: l.coordinate.latitude, longitude: l.coordinate.longitude,
             horizontalAccuracy: l.horizontalAccuracy, speed: l.speed < 0 ? -1 : l.speed,
@@ -551,19 +753,13 @@ final class TrackingEngine: LocationProviderDelegate {
             provider: "gps", isMock: mock)
     }
 
-    private func persist(_ fix: NativeFix) {
-        storeQueue.async { [weak self] in
-            guard let self = self else { return }
-            do {
-                try self.store.append(fix)
-            } catch {
-                // Recording goes on; the loss is visible in the snapshot.
-                NSLog("[flutter_tracking_gps] persisting a fix failed: %@", String(describing: error))
-                self.queue.async { [weak self] in
-                    self?.lastError = "\(TrackingErrorCode.storeWriteFailed): \(error.localizedDescription)"
-                }
-            }
-        }
+    private static func nativeFix(_ f: JournalRecord.Fix) -> NativeFix {
+        NativeFix(
+            sessionId: f.sessionId, segmentId: Int64(f.segmentId), seq: f.seq, timeMs: f.wallTimeMs,
+            elapsedMs: f.timeMs, latitude: f.latitude, longitude: f.longitude,
+            horizontalAccuracy: f.horizontalAccuracy, speed: f.speed, speedAccuracy: f.speedAccuracy,
+            course: f.course, altitude: f.altitude, verticalAccuracy: f.verticalAccuracy,
+            provider: f.provider, isMock: f.isMock)
     }
 
     /// Delivers a result on the main thread, as Flutter requires.

@@ -4,7 +4,7 @@
 #
 Pod::Spec.new do |s|
   s.name             = 'flutter_tracking_gps'
-  s.version          = '0.0.1'
+  s.version          = '0.0.1-beta'
   s.summary          = 'Own GPS tracking engine for Flutter.'
   s.description      = <<-DESC
 Own GPS tracking engine for Flutter.

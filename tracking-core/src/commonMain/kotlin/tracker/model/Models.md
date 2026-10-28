@@ -66,3 +66,6 @@ The constructor validates every value (`maxAccuracyMeters` finite and positive, 
 
 ## Steps (added)
 `TrackingConfig.initialStrideMeters: Double?` (null = none) and `TrackingSnapshot.strideMeters: Double?`.
+
+## Added
+`PdrPolicy.TRUSTED_WHEN_CALIBRATED`; `TrackingConfig.recoveryStepEvidenceAfterMs` (default 30 s); `TrackingSnapshot.activeTimeMs`, `bridgedGapMs`, `uncreditedGapMs`, `uncreditedGaps`, `ambiguousSteps`.

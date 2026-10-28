@@ -1,5 +1,17 @@
 /// The recording lifecycle. Not the same thing as GPS quality or movement.
-enum RecordingState { idle, running, paused, finished }
+enum RecordingState {
+  idle,
+  running,
+  paused,
+
+  /// `finish` was asked and is being finalized (live data closed, the exact step
+  /// count requested, the journal flushed). NOT final: wait for [finished].
+  finishing,
+  finished,
+}
+
+/// Native health is independent from the last commanded recording state.
+enum TrackingFailureState { none, permissionDenied, error }
 
 /// State of the native step sensor.
 enum StepsStatus {
@@ -12,6 +24,9 @@ enum StepsStatus {
 
   /// The device has no step sensor.
   unavailable,
+
+  /// The sensor reported a runtime or setup error (see `TrackingSnapshot.error`).
+  failed,
 }
 
 enum GpsQuality {

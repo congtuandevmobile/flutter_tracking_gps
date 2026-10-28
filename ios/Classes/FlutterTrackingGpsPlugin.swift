@@ -10,8 +10,8 @@ public class FlutterTrackingGpsPlugin: NSObject, FlutterPlugin, TrackingHostApi 
     private static let engine: TrackingEngine = {
         let directory = FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("flutter_tracking_gps", isDirectory: true)
-        return TrackingEngine(provider: CoreLocationProvider(), store: FileFixStore(directory: directory))
+            .appendingPathComponent("flutter_tracking_gps/journal", isDirectory: true)
+        return TrackingEngine(provider: CoreLocationProvider(), store: FileJournalStore(directory: directory))
     }()
 
     private var eventSink: PigeonEventSink<NativeFix>?
@@ -84,6 +84,10 @@ public class FlutterTrackingGpsPlugin: NSObject, FlutterPlugin, TrackingHostApi 
 
     func restoreSession(config: StartConfig, completion: @escaping (Result<NativeSnapshot, Error>) -> Void) {
         FlutterTrackingGpsPlugin.engine.restore(config: config, completion: completion)
+    }
+
+    func listSessions(completion: @escaping (Result<[String], Error>) -> Void) {
+        FlutterTrackingGpsPlugin.engine.listSessions(completion: completion)
     }
 
     func getReport() throws -> String {

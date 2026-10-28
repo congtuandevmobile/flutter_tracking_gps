@@ -35,6 +35,15 @@ class BridgeSnapshot(
     val steps: Long,
     /** Learned or configured metres per step; negative = unknown. */
     val strideMeters: Double,
+    /** Workout time: running legs only, pauses excluded. */
+    val activeTimeMs: Long,
+    /** Time of GPS gaps that were credited (bridge or estimate). */
+    val bridgedGapMs: Long,
+    /** Time of GPS gaps and unmeasured intervals that were NOT credited. */
+    val uncreditedGapMs: Long,
+    val uncreditedGaps: Int,
+    /** Steps in batches that straddle a GPS-quality change: used for nothing. */
+    val ambiguousSteps: Long,
 )
 
 /** What to ask the OS for (see `AdaptiveSamplingPolicy`). */
@@ -72,6 +81,10 @@ class TrackingCoreBridge(
     stopMinDwellMs: Long,
     /** Metres per step to start from; zero or negative = none. */
     initialStrideMeters: Double,
+    /** Credit a calibrated step estimate for a long or curved gap (opt-in; see `PdrPolicy`). */
+    pdrTrustedWhenCalibrated: Boolean,
+    /** A gap at least this long with no steps measured credits 0 m; zero or negative disables. */
+    recoveryStepEvidenceAfterMs: Long,
     private val adaptiveSampling: Boolean,
     batterySaver: Boolean,
 ) {
@@ -86,54 +99,92 @@ class TrackingCoreBridge(
         maxBridgeMs = maxBridgeMs,
         reanchorAfterRejects = reanchorAfterRejects,
         rejectMock = rejectMock,
-        pdrPolicy = if (pdrEnabled) PdrPolicy.CONFIRMED_BY_GPS else PdrPolicy.OFF,
+        pdrPolicy = when {
+            !pdrEnabled -> PdrPolicy.OFF
+            pdrTrustedWhenCalibrated -> PdrPolicy.TRUSTED_WHEN_CALIBRATED
+            else -> PdrPolicy.CONFIRMED_BY_GPS
+        },
         pdrConfirmRatio = pdrConfirmRatio,
         smoothing = if (kalman) Smoothing.KALMAN else Smoothing.OFF,
         stopRadiusMeters = stopRadiusMeters,
         stopMinDwellMs = stopMinDwellMs,
         initialStrideMeters = if (initialStrideMeters > 0.0) initialStrideMeters else null,
+        recoveryStepEvidenceAfterMs = recoveryStepEvidenceAfterMs,
     )
     private val engine = GpsDistanceEngine(config)
     private val sampling = AdaptiveSamplingPolicy(batterySaver)
     private val fixedPlan = SamplingPlan(1_000, 2.0, true)
     private val steps = StepSession()
+    private var stepLegStartedAtMs = 0L
+    private var lastStepMeasuredMs: Long? = null
 
     /** [initialSteps] restores a saved session total (the device counter is never added to it). */
     fun start(sessionId: String, atMs: Long, segmentId: Int, initialSteps: Long = 0) {
         sampling.reset()
         engine.silenceAfterMs = config.silenceAfterMs
         engine.start(sessionId, atMs, segmentId)
+        stepLegStartedAtMs = atMs
+        lastStepMeasuredMs = null
         steps.reset(initialSteps)
         steps.openSegment()
     }
 
     fun pause(atMs: Long) {
+        if (engine.state != RecordingState.RUNNING) return
         engine.pause(atMs)
+        lastStepMeasuredMs = null
         steps.closeSegment()
     }
 
     fun resume(atMs: Long, segmentId: Int) {
+        if (engine.state != RecordingState.PAUSED) return
         engine.resume(atMs, segmentId)
+        stepLegStartedAtMs = atMs
+        lastStepMeasuredMs = null
         steps.openSegment()
     }
 
     fun finish(atMs: Long) {
+        if (engine.state == RecordingState.IDLE || engine.state == RecordingState.FINISHED) return
         engine.finish(atMs)
+        lastStepMeasuredMs = null
         steps.closeSegment()
     }
 
+    /** The step sensor works (hardware and permission): its silence becomes evidence. */
+    fun setStepSensorActive(active: Boolean) = engine.setStepSensorActive(active)
+
     /**
      * A reading of the device's CUMULATIVE step counter (Android
-     * `TYPE_STEP_COUNTER`) in [segmentId]. The first reading of a segment is a
-     * baseline. The steps it adds go to the engine as a delta (see
-     * `GpsDistanceEngine.onSteps`). [atMs] is the arrival time on the engine's clock.
+     * `TYPE_STEP_COUNTER`) in [segmentId]. [measuredAtMs] is the sensor's own time
+     * of the reading (the time of its LAST step), [deliveredAtMs] when it reached
+     * us, both on the engine's clock. The first reading of a segment is a
+     * baseline; the next ones carry the interval since the previous reading,
+     * which is what the engine classifies by GPS quality.
      */
-    fun onStepCounter(segmentId: Int, atMs: Long, raw: Long) =
-        feedSteps(segmentId, atMs, steps.onCounter(raw))
+    fun onStepCounter(segmentId: Int, measuredAtMs: Long, deliveredAtMs: Long, raw: Long) {
+        if (!acceptsSteps(segmentId, deliveredAtMs)) return
+        val from = lastStepMeasuredMs ?: measuredAtMs
+        val added = steps.onCounter(raw)
+        lastStepMeasuredMs = maxOf(from, measuredAtMs)
+        if (added > 0L) engine.onSteps(segmentId, from, maxOf(from, measuredAtMs), deliveredAtMs, added)
+    }
 
-    /** A step count since the segment started (iOS `CMPedometer` from a start date). */
-    fun onSegmentSteps(segmentId: Int, atMs: Long, segmentSteps: Long) =
-        feedSteps(segmentId, atMs, steps.onSegmentCount(segmentSteps))
+    /**
+     * A step count since the segment started (iOS `CMPedometer` from a start
+     * date) measured up to [measuredAtMs] (the data's end date) and delivered at
+     * [deliveredAtMs].
+     */
+    fun onSegmentSteps(segmentId: Int, measuredAtMs: Long, deliveredAtMs: Long, segmentSteps: Long) {
+        if (!acceptsSteps(segmentId, deliveredAtMs)) return
+        val from = lastStepMeasuredMs ?: stepLegStartedAtMs
+        val added = steps.onSegmentCount(segmentSteps)
+        lastStepMeasuredMs = maxOf(from, measuredAtMs)
+        if (added > 0L) engine.onSteps(segmentId, from, maxOf(from, measuredAtMs), deliveredAtMs, added)
+    }
+
+    private fun acceptsSteps(segment: Int, deliveredAtMs: Long): Boolean =
+        engine.state == RecordingState.RUNNING && segment == engine.segmentId && deliveredAtMs >= stepLegStartedAtMs
 
     /**
      * An exact count for the segment that was just paused or finished (iOS asks
@@ -141,6 +192,7 @@ class TrackingCoreBridge(
      * distance is never derived from it.
      */
     fun correctClosedSegment(exactSteps: Long) {
+        if (engine.state != RecordingState.PAUSED && engine.state != RecordingState.FINISHED) return
         steps.correctClosedSegment(exactSteps)
     }
 
@@ -208,6 +260,11 @@ class TrackingCoreBridge(
             isStopped = s.isStopped,
             steps = steps.total,
             strideMeters = s.strideMeters ?: -1.0,
+            activeTimeMs = s.activeTimeMs,
+            bridgedGapMs = s.bridgedGapMs,
+            uncreditedGapMs = s.uncreditedGapMs,
+            uncreditedGaps = s.uncreditedGaps,
+            ambiguousSteps = s.ambiguousSteps,
         )
     }
 

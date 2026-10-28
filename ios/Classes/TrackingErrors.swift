@@ -13,6 +13,11 @@ enum TrackingErrorCode {
     static let storeClearFailed = "STORE_CLEAR_FAILED"
     static let storeWriteFailed = "STORE_WRITE_FAILED"
     static let locationFailed = "LOCATION_UPDATES_FAILED"
+    static let journalRepaired = "JOURNAL_REPAIRED"
+    static let journalCorrupt = "JOURNAL_CORRUPT"
+    static let engineChanged = "ENGINE_CHANGED"
+    static let storeListFailed = "STORE_LIST_FAILED"
+    static let sessionOpen = "SESSION_OPEN"
 }
 
 /// Failures the engine itself detects.

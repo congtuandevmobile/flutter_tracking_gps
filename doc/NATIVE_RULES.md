@@ -16,7 +16,7 @@ package owner; do not write native code that ignores them.
 - **Concurrency:** Swift Concurrency (`async`/`await`) or GCD. Every result
   handed to Flutter is wrapped in `DispatchQueue.main.async { ... }`.
 - **Protocol-oriented:** protocols and delegates for abstraction and tests
-  (`LocationProviding`, `FixStoring`).
+  (`LocationProviding`, `JournalStoring`, `StepProviding`).
 - **Memory:** no strong reference cycles: `[weak self]` / `unowned self` in
   closures, especially `EventChannel` callbacks.
 

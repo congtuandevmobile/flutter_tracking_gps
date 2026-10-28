@@ -10,16 +10,15 @@ enum PlatformPermission {
   servicesDisabled,
 }
 
-/// Who keeps the Android process alive while recording.
-enum AndroidForegroundMode {
-  /// The SDK's own foreground service and default notification.
-  builtIn,
-
-  /// A third-party presenter owns a foreground service; the SDK starts none.
-  external,
+enum PlatformState {
+  idle,
+  running,
+  paused,
+  finishing,
+  stopped,
+  permissionDenied,
+  error,
 }
-
-enum PlatformState { idle, running, paused, stopped, permissionDenied, error }
 
 /// What the native distance engine has decided.
 class PlatformDistance {
@@ -36,6 +35,11 @@ class PlatformDistance {
     this.lastAcceptedFixAt,
     this.steps = 0,
     this.strideMeters,
+    this.activeTime = Duration.zero,
+    this.bridgedGap = Duration.zero,
+    this.uncreditedGap = Duration.zero,
+    this.uncreditedGaps = 0,
+    this.ambiguousSteps = 0,
   });
 
   const PlatformDistance.empty()
@@ -50,7 +54,12 @@ class PlatformDistance {
       speedMps = null,
       lastAcceptedFixAt = null,
       steps = 0,
-      strideMeters = null;
+      strideMeters = null,
+      activeTime = Duration.zero,
+      bridgedGap = Duration.zero,
+      uncreditedGap = Duration.zero,
+      uncreditedGaps = 0,
+      ambiguousSteps = 0;
 
   final GpsQuality quality;
   final double totalMeters;
@@ -68,6 +77,11 @@ class PlatformDistance {
 
   /// Learned or configured metres per step; null while unknown.
   final double? strideMeters;
+  final Duration activeTime;
+  final Duration bridgedGap;
+  final Duration uncreditedGap;
+  final int uncreditedGaps;
+  final int ambiguousSteps;
 }
 
 class PlatformSnapshot {
@@ -77,6 +91,8 @@ class PlatformSnapshot {
     required this.fixCount,
     this.distance = const PlatformDistance.empty(),
     this.stepsStatus = StepsStatus.off,
+    this.stepsFinal = false,
+    this.journalPending = 0,
     this.sessionId,
     this.error,
   });
@@ -87,6 +103,10 @@ class PlatformSnapshot {
   final int fixCount;
   final PlatformDistance distance;
   final StepsStatus stepsStatus;
+  final bool stepsFinal;
+
+  /// Events accepted but not on disk yet (see `TrackingSnapshot.isDurable`).
+  final int journalPending;
   final String? error;
 }
 
@@ -120,7 +140,6 @@ abstract interface class TrackingPlatform {
     required String notificationText,
     required bool stepsEnabled,
     required int initialSteps,
-    required AndroidForegroundMode foregroundMode,
   });
 
   /// Rebuilds the native engine of [sessionId] from the persisted fixes after a
@@ -151,4 +170,7 @@ abstract interface class TrackingPlatform {
   Future<List<TrackingFix>> readPersistedFixes(String sessionId, int afterSeq);
 
   Future<void> clearSession(String sessionId);
+
+  /// The ids of the sessions persisted on this device (recovery after a kill).
+  Future<List<String>> listSessions();
 }

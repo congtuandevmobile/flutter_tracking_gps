@@ -9,10 +9,12 @@ tracking-core/src/commonMain/kotlin/tracker/   plain Kotlin, no platform API,
                                                no third-party library
   ├─ algorithms/geometry     GeoMath, DouglasPeucker
   ├─ algorithms/filtering    Kalman2D, LowPassFilter, OutlierRejector
-  ├─ algorithms/motion       StopDetector
+  ├─ algorithms/motion       StopDetector, StrideEstimator, StepSession
   ├─ algorithms/fusion       GapReconciler
   ├─ algorithms/power        AdaptiveSamplingPolicy
   ├─ engine                  GpsDistanceEngine, DistanceLedger, TrackingLog
+  ├─ journal                 SessionRecorder, JournalCodec, Wire (CRC-32), records:
+  │                          write-ahead journal + exact replay (see JOURNAL.md)
   ├─ model                   TrackingFix, TrackingConfig, TrackingSnapshot, ...
   └─ auxiliary               Dbscan, KMeans, RoadGraph (Dijkstra, A*), HmmMapMatcher
 tracking-core/src/commonTest/kotlin/tracker/   tests, run on the JVM (fast)
@@ -29,7 +31,7 @@ tracking-core/src/commonTest/kotlin/tracker/   tests, run on the JVM (fast)
 - **Tests:** `cd tracking-core && ./gradlew jvmTest`.
 
 Native code (CoreLocation, Fused location, foreground service, persistence) stays
-in Swift/Kotlin and follows `docs/NATIVE_RULES.md`.
+in Swift/Kotlin and follows `doc/NATIVE_RULES.md`.
 
 ## Verified on this machine
 
