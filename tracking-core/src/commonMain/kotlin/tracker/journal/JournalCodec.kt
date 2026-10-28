@@ -34,9 +34,9 @@ object JournalCodec {
     /**
      * The journal FORMAT written by this code. Bump it whenever a record is added or changed in a way an
      * older reader would misread: an older reader refuses a newer version (UNSUPPORTED_VERSION) instead of
-     * treating a valid new record as damage. Version 2 added `Z` (finalized) and `Y` (segment settled).
+     * treating a valid new record as damage. Version 2 added `Z` (finalized) and `Y` (segment settled); version 3 added `Q` (recovered after a process death) and the optional calendar time of a `T` tick.
      */
-    const val VERSION = 2
+    const val VERSION = 3
 
     /** The oldest format this code still reads (version 1 has no `Z`/`Y` records). */
     const val MIN_VERSION = 1
@@ -69,7 +69,8 @@ object JournalCodec {
                 r.horizontalAccuracy, r.speed, r.speedAccuracy, r.course, r.altitude, r.verticalAccuracy,
                 e(r.provider), b(r.isMock), r.nowMs,
             )
-            is JournalRecord.Tick -> join("T", r.atMs)
+            is JournalRecord.Tick -> if (r.wallMs >= 0) join("T", r.atMs, r.wallMs) else join("T", r.atMs)
+            is JournalRecord.Recovered -> join("Q", r.targetMs, r.offsetMs, r.gapMs, b(r.wasRunning), r.nextSegmentId, b(r.anomaly), r.wallMs)
             is JournalRecord.StepCounter -> join("C", r.segmentId, r.measuredAtMs, r.deliveredAtMs, r.raw)
             is JournalRecord.SegmentSteps -> join("S", r.segmentId, r.measuredAtMs, r.deliveredAtMs, r.count)
             is JournalRecord.StepsCorrection -> join("K", r.exactSteps)
@@ -103,7 +104,10 @@ object JournalCodec {
                         provider = u(f[14]), isMock = f[15] == "1", nowMs = f[16].toLong(),
                     )
                 }
-                "T" -> need(f, 2) { JournalRecord.Tick(f[1].toLong()) }
+                "T" -> if (f.size == 3) JournalRecord.Tick(f[1].toLong(), f[2].toLong()) else need(f, 2) { JournalRecord.Tick(f[1].toLong()) }
+                "Q" -> need(f, 8) {
+                    JournalRecord.Recovered(f[1].toLong(), f[2].toLong(), f[3].toLong(), f[4] == "1", f[5].toInt(), f[6] == "1", f[7].toLong())
+                }
                 "C" -> need(f, 5) { JournalRecord.StepCounter(f[1].toInt(), f[2].toLong(), f[3].toLong(), f[4].toLong()) }
                 "S" -> need(f, 5) { JournalRecord.SegmentSteps(f[1].toInt(), f[2].toLong(), f[3].toLong(), f[4].toLong()) }
                 "K" -> need(f, 2) { JournalRecord.StepsCorrection(f[1].toLong()) }

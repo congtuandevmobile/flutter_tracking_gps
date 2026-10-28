@@ -211,7 +211,17 @@ class StartConfig {
     required this.batterySaver,
     required this.stepsEnabled,
     required this.initialSteps,
+    required this.recoverRunning,
+    required this.maxRecoverGapMs,
   });
+
+  /// Restore only: continue a session that was RECORDING when its process died, crediting the calendar time that
+  /// passed (see `SessionRecorder.recoverAfterProcessDeath`). False restores it paused at its last event.
+  bool recoverRunning;
+
+  /// Restore with [recoverRunning]: a dead interval longer than this is NOT credited and the session is parked
+  /// paused instead. 0 = no limit.
+  int maxRecoverGapMs;
 
   /// Count steps natively (Android `TYPE_STEP_COUNTER`, iOS `CMPedometer`) and
   /// let the engine turn them into a pending estimate while GPS is weak. Without
@@ -327,6 +337,17 @@ class NativeDistance {
   int distanceEligibleSteps;
 }
 
+enum NativeCollection {
+  /// Location is being collected.
+  collecting,
+
+  /// The session is not recording (idle, paused, finished).
+  notCollecting,
+
+  /// The session should be recording but location cannot be collected (permission, service refused).
+  blocked,
+}
+
 class NativeSnapshot {
   NativeSnapshot({
     required this.state,
@@ -340,6 +361,10 @@ class NativeSnapshot {
     required this.journalFailed,
     required this.restoreState,
     required this.engineChanged,
+    required this.elapsedTimeMs,
+    required this.recoveredGapMs,
+    required this.clockAnomaly,
+    required this.collection,
     this.sessionId,
     this.lastFixTimeMs,
     this.error,
@@ -364,6 +389,19 @@ class NativeSnapshot {
   /// what this snapshot shows is NOT guaranteed to survive a crash, whatever
   /// [journalPending] says, and the recording must be treated as not durable.
   bool journalFailed;
+
+  /// Start to finish, PAUSES INCLUDED (it keeps running until the session finishes).
+  int elapsedTimeMs;
+
+  /// Calendar time that passed while the process was dead, credited by a recovery (summed). 0 when none.
+  int recoveredGapMs;
+
+  /// The calendar clock went backwards across a recovery: that gap could not be measured and counted as 0.
+  bool clockAnomaly;
+
+  /// Whether native is actually collecting location now, separate from what the person asked for: a recovered
+  /// session can have its clock back while collection is blocked (permission, foreground service refused).
+  NativeCollection collection;
 
   /// True when the step total is final: after `stop`, the platform's exact count
   /// for the closed segment was obtained (or there is no step sensor). False
@@ -434,6 +472,11 @@ abstract class TrackingHostApi {
   /// PAUSED: [resume] continues it in a new segment.
   @async
   NativeSnapshot restoreSession(StartConfig config);
+
+  /// The id of the session that was recording or paused when it was last seen (the open-session pointer), or null.
+  /// Written when a session starts, removed when it finishes or is cleared.
+  @async
+  String? activeSessionId();
 
   /// Coordinate-free timeline of what the native engine decided.
   String getReport();

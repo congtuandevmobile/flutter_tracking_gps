@@ -195,7 +195,12 @@ class TrackingSession {
   /// PAUSED; [resume] continues it in a new segment. If native still runs it,
   /// nothing is replayed. A damaged last record is dropped and reported in
   /// [TrackingSnapshot.error]; an unusable journal throws.
-  Future<void> restore({required String sessionId}) async {
+  ///
+  /// With [recoverRunning] a session that was RECORDING when its process died continues: the calendar time that
+  /// passed is credited to the clock (see [TrackingSnapshot.recoveredGap]), the recording continues in a NEW
+  /// segment, and no distance is invented for the dead interval. A session that was paused stays paused. A dead
+  /// interval longer than `TrackingConfig.maxRecoverGap` is not credited and the session comes back paused.
+  Future<void> restore({required String sessionId, bool recoverRunning = false}) async {
     _sessionId = sessionId;
     _listen();
     final native = await _platform.restoreSession(
@@ -207,6 +212,9 @@ class TrackingSession {
       batterySaver: batterySaver,
       stepsEnabled: stepsEnabled,
       initialSteps: initialSteps,
+      recoverRunning: recoverRunning,
+      notificationTitle: notificationTitle,
+      notificationText: notificationText,
     );
     _apply(native);
   }
@@ -288,6 +296,10 @@ class TrackingSession {
           (native.error?.startsWith('STORE_WRITE_FAILED') ?? false),
       restoreState: native.restoreState,
       engineChanged: native.engineChanged,
+      elapsedTime: native.elapsedTime,
+      recoveredGap: native.recoveredGap,
+      clockAnomaly: native.clockAnomaly,
+      collection: native.collection,
       distanceEligibleSteps: d.distanceEligibleSteps,
       activeTime: d.activeTime,
       bridgedGap: d.bridgedGap,

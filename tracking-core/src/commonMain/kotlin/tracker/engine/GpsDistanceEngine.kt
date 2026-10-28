@@ -183,6 +183,20 @@ class GpsDistanceEngine(
         log.note(atMs, "start segment $segmentId")
     }
 
+    /**
+     * The process died for [gapMs] while recording. If GPS was healthy nothing opened a gap, so the silence is
+     * recorded here as an unmeasured interval; if a gap was already open, closing the leg counts it (never twice).
+     */
+    fun markInterruption(gapMs: Long) {
+        require(gapMs >= 0) { "gap must not be negative" }
+        if (state != RecordingState.RUNNING || gapMs == 0L) return
+        if (quality == GpsQuality.GOOD || quality == GpsQuality.RECOVERING) {
+            uncreditedGapMs += gapMs
+            uncreditedGaps++
+            log.note(lastNowMs, "interrupted for $gapMs ms (process death)")
+        }
+    }
+
     /** Closes the segment: the anchor is forgotten and a pending estimate dropped. */
     fun pause(atMs: Long) {
         if (state != RecordingState.RUNNING) return

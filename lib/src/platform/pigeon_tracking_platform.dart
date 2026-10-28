@@ -87,6 +87,9 @@ class PigeonTrackingPlatform implements TrackingPlatform {
     required bool batterySaver,
     required bool stepsEnabled,
     required int initialSteps,
+    bool recoverRunning = false,
+    String notificationTitle = '',
+    String notificationText = '',
   }) async => _snapshot(
     await _api.restoreSession(
       _startConfig(
@@ -98,13 +101,18 @@ class PigeonTrackingPlatform implements TrackingPlatform {
         minDistanceMeters: minDistanceMeters,
         adaptiveSampling: adaptiveSampling,
         batterySaver: batterySaver,
-        notificationTitle: '',
-        notificationText: '',
+        notificationTitle: notificationTitle,
+        notificationText: notificationText,
         stepsEnabled: stepsEnabled,
         initialSteps: initialSteps,
+        recoverRunning: recoverRunning,
+        inheritRecoverGap: true,
       ),
     ),
   );
+
+  @override
+  Future<String?> activeSessionId() => _api.activeSessionId();
 
   @override
   Future<void> submitPdr(String sessionId, int segmentId, double meters) async =>
@@ -176,7 +184,13 @@ class PigeonTrackingPlatform implements TrackingPlatform {
     required String notificationText,
     required bool stepsEnabled,
     required int initialSteps,
+    bool recoverRunning = false,
+    bool inheritRecoverGap = false,
   }) => StartConfig(
+    recoverRunning: recoverRunning,
+    // A restore without its own limit inherits the one stored in the journal (-1), so the same journal recovers the
+    // same way whoever runs first (this call, or the Android service without Flutter).
+    maxRecoverGapMs: config.maxRecoverGap?.inMilliseconds ?? (inheritRecoverGap ? -1 : 0),
     sessionId: sessionId,
     startSeq: startSeq,
     startSegmentId: startSegmentId,
@@ -253,6 +267,14 @@ class PigeonTrackingPlatform implements TrackingPlatform {
       NativeRestoreState.partial => RestoreState.partial,
     },
     engineChanged: s.engineChanged,
+    elapsedTime: Duration(milliseconds: s.elapsedTimeMs),
+    recoveredGap: Duration(milliseconds: s.recoveredGapMs),
+    clockAnomaly: s.clockAnomaly,
+    collection: switch (s.collection) {
+      NativeCollection.collecting => CollectionState.collecting,
+      NativeCollection.notCollecting => CollectionState.notCollecting,
+      NativeCollection.blocked => CollectionState.blocked,
+    },
     error: s.error,
   );
 

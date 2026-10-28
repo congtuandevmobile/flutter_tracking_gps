@@ -222,6 +222,9 @@ class TrackingCoreBridge(
     /** Returns the GPS quality code. */
     fun onTick(nowMs: Long): Int = qualityCode(engine.onTick(nowMs))
 
+    /** The process died for [gapMs] while recording: an unmeasured interval (see `GpsDistanceEngine.markInterruption`). */
+    fun markInterruption(gapMs: Long) = engine.markInterruption(gapMs)
+
     /**
      * Feeds one fix; returns the `FixVerdict` code. Exactly `-1.0` means unknown
      * for [horizontalAccuracy], [speed] and [speedAccuracy]; NaN, infinity or any

@@ -1,6 +1,7 @@
 package io.github.congtuandevmobile.flutter_tracking_gps
 
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -111,6 +112,10 @@ private class MemoryJournalStore : JournalStore {
     }
     override fun clear(sessionId: String) { files.remove(sessionId); sinks.remove(sessionId) }
     override fun release(sessionId: String) {}
+    var active: String? = null
+    override fun activeId(): String? = active
+    override fun markActive(sessionId: String) { active = sessionId }
+    override fun clearActive(sessionId: String) { if (active == sessionId) active = null }
     override fun list(): List<String> = files.values.mapNotNull { (it.firstOrNull()?.let(JournalCodec::decode) as? JournalRecord.Header)?.sessionId }
 }
 
@@ -122,11 +127,15 @@ private fun engineConfig(stride: Double = -1.0, maxSpeed: Double = 10.0) = Engin
     pdrTrustedWhenCalibrated = false, recoveryStepEvidenceAfterMs = 30_000,
 )
 
-private fun startConfig(id: String = "s", adaptive: Boolean = false, steps: Boolean = false, engine: EngineConfig = engineConfig()) = StartConfig(
+private fun startConfig(
+    id: String = "s", adaptive: Boolean = false, steps: Boolean = false, engine: EngineConfig = engineConfig(),
+    recover: Boolean = false, maxGapMs: Long = 0,
+) = StartConfig(
     stepsEnabled = steps, initialSteps = 0,
     sessionId = id, startSeq = 0, startSegmentId = 0, intervalMs = 1000, minDistanceMeters = 0.0,
     notificationTitle = "t", notificationText = "x", engine = engine,
     adaptiveSampling = adaptive, batterySaver = false,
+    recoverRunning = recover, maxRecoverGapMs = maxGapMs,
 )
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -665,5 +674,129 @@ class RestorePlanNativeTest {
         val header = JournalCodec.decode(store.read("s")[0]) as JournalRecord.Header
         assertEquals(JournalCodec.VERSION, header.version)
         assertEquals(1, store.backups)
+    }
+}
+
+
+@OptIn(ExperimentalCoroutinesApi::class)
+class ProcessDeathRecoveryNativeTest {
+    private var clock = MONO
+
+    private fun engine(source: FakeSource, store: MemoryJournalStore, scope: CoroutineScope) = TrackingEngine(
+        source = source, store = store, stepSource = NoStepSource, scope = scope,
+        wallClockMs = { BASE + (clock - MONO) }, monotonicMs = { clock },
+    )
+
+    private suspend fun runFor(e: TrackingEngine, source: FakeSource, seconds: Int) {
+        for (i in 1..seconds) {
+            clock = MONO + i * 1000L
+            source.push(loc(i.toDouble(), i * 3.0, speed = 3.0))
+        }
+    }
+
+    @Test fun theOpenSessionPointerFollowsTheSession() = runTest {
+        val store = MemoryJournalStore()
+        val scope = CoroutineScope(backgroundScope.coroutineContext + UnconfinedTestDispatcher(testScheduler))
+        val e = engine(FakeSource(), store, scope)
+        assertNull(e.activeSessionId())
+        e.start(startConfig())
+        assertEquals("s", e.activeSessionId())
+        e.stop("s")
+        assertNull(e.activeSessionId(), "a finished session is not open any more")
+    }
+
+    @Test fun aRecoveredSessionContinuesRecordingAndCreditsTheDeadInterval() = runTest {
+        val store = MemoryJournalStore()
+        val scope = CoroutineScope(backgroundScope.coroutineContext + UnconfinedTestDispatcher(testScheduler))
+        val source1 = FakeSource()
+        val deadScope = CoroutineScope(backgroundScope.coroutineContext + kotlinx.coroutines.Job() + UnconfinedTestDispatcher(testScheduler))
+        val dying = engine(source1, store, deadScope)
+        dying.start(startConfig())
+        runFor(dying, source1, 10)
+        val before = dying.snapshot().distance
+        deadScope.cancel() // the process is gone: nothing of it runs any more
+
+        // The process dies; 30 s later a NEW process finds the open session and continues it.
+        clock = MONO + 40_000
+        val source2 = FakeSource()
+        val reborn = engine(source2, store, scope)
+        val snapshot = reborn.recoverActive()
+        assertNotNull(snapshot)
+        assertEquals(NativeTrackingState.RUNNING, snapshot.state)
+        assertEquals(1L, snapshot.segmentId, "a new segment: nothing is bridged across the dead interval")
+        assertEquals(30_000L, snapshot.recoveredGapMs)
+        assertEquals(NativeCollection.COLLECTING, snapshot.collection)
+        assertEquals(1, source2.requests.size, "location collection was started again")
+        assertEquals(before.totalMeters, snapshot.distance.totalMeters, 1e-6, "no distance is invented")
+        assertTrue(snapshot.distance.activeTimeMs >= 39_000, "active ${snapshot.distance.activeTimeMs}")
+        assertTrue(snapshot.elapsedTimeMs >= 39_000, "elapsed ${snapshot.elapsedTimeMs}")
+    }
+
+    @Test fun recoveringTwiceDoesNotReplayAnOpenSessionAgain() = runTest {
+        val store = MemoryJournalStore()
+        val scope = CoroutineScope(backgroundScope.coroutineContext + UnconfinedTestDispatcher(testScheduler))
+        val dying = engine(FakeSource(), store, scope)
+        dying.start(startConfig())
+        clock = MONO + 5_000
+        val reborn = engine(FakeSource(), store, scope)
+        reborn.recoverActive()
+        val again = reborn.recoverActive()
+        assertEquals(NativeTrackingState.RUNNING, again?.state)
+        assertEquals(1, store.sinks.size, "one writer: the same session was not opened twice")
+    }
+
+    @Test fun aRecoveryWithNothingOpenDoesNothing() = runTest {
+        val scope = CoroutineScope(backgroundScope.coroutineContext + UnconfinedTestDispatcher(testScheduler))
+        assertNull(engine(FakeSource(), MemoryJournalStore(), scope).recoverActive())
+    }
+
+    @Test fun aPausedSessionStaysPausedButItsElapsedTimeKeepsGrowing() = runTest {
+        val store = MemoryJournalStore()
+        val scope = CoroutineScope(backgroundScope.coroutineContext + UnconfinedTestDispatcher(testScheduler))
+        val source = FakeSource()
+        val deadScope = CoroutineScope(backgroundScope.coroutineContext + kotlinx.coroutines.Job() + UnconfinedTestDispatcher(testScheduler))
+        val dying = engine(source, store, deadScope)
+        dying.start(startConfig())
+        runFor(dying, source, 10)
+        dying.pause("s")
+        deadScope.cancel()
+        clock = MONO + 70_000
+        val snapshot = engine(FakeSource(), store, scope).recoverActive()
+        assertNotNull(snapshot)
+        assertEquals(NativeTrackingState.PAUSED, snapshot.state)
+        assertEquals(NativeCollection.NOT_COLLECTING, snapshot.collection)
+        assertTrue(snapshot.elapsedTimeMs >= 69_000, "elapsed ${snapshot.elapsedTimeMs}")
+        assertTrue(snapshot.distance.activeTimeMs in 9_000..11_000, "pauses are not workout time: ${snapshot.distance.activeTimeMs}")
+    }
+
+    @Test fun aRecordingThatCannotCollectLocationSaysSo() = runTest {
+        val store = MemoryJournalStore()
+        val scope = CoroutineScope(backgroundScope.coroutineContext + UnconfinedTestDispatcher(testScheduler))
+        val dying = engine(FakeSource(), store, scope)
+        dying.start(startConfig())
+        clock = MONO + 3_000
+        val broken = FakeSource().also { it.failure = SecurityException("no permission") }
+        val snapshot = engine(broken, store, scope).recoverActive()
+        assertEquals(NativeCollection.BLOCKED, snapshot?.collection)
+    }
+
+    @Test fun aRecoveryNeverReplacesASessionThisProcessAlreadyHolds() = runTest {
+        val store = MemoryJournalStore()
+        val scope = CoroutineScope(backgroundScope.coroutineContext + UnconfinedTestDispatcher(testScheduler))
+        val e = engine(FakeSource(), store, scope)
+        e.start(startConfig("b"))
+        store.active = "a" // a pointer left by an older session
+        val snapshot = e.recoverActive()
+        assertEquals("b", snapshot?.sessionId, "the session the person started wins")
+        assertEquals(NativeTrackingState.RUNNING, snapshot?.state)
+    }
+
+    @Test fun aPauseIsNotAcknowledgedUntilItIsDurable() = runTest {
+        val store = MemoryJournalStore()
+        val scope = CoroutineScope(backgroundScope.coroutineContext + UnconfinedTestDispatcher(testScheduler))
+        val e = engine(FakeSource(), store, scope)
+        e.start(startConfig())
+        store.failOnAppend = true // from now on nothing reaches the disk
+        assertFailsWith<IOException> { e.pause("s") }
     }
 }

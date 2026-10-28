@@ -27,6 +27,10 @@ class TrackingSnapshot {
     this.journalFailed = false,
     this.restoreState = RestoreState.notRestored,
     this.engineChanged = false,
+    this.elapsedTime = Duration.zero,
+    this.recoveredGap = Duration.zero,
+    this.clockAnomaly = false,
+    this.collection = CollectionState.notCollecting,
     this.distanceEligibleSteps = 0,
     this.activeTime = Duration.zero,
     this.bridgedGap = Duration.zero,
@@ -60,6 +64,10 @@ class TrackingSnapshot {
       journalFailed = false,
       restoreState = RestoreState.notRestored,
       engineChanged = false,
+      elapsedTime = Duration.zero,
+      recoveredGap = Duration.zero,
+      clockAnomaly = false,
+      collection = CollectionState.notCollecting,
       distanceEligibleSteps = 0,
       activeTime = Duration.zero,
       bridgedGap = Duration.zero,
@@ -130,6 +138,21 @@ class TrackingSnapshot {
   /// before a damaged record was restored: the numbers here are incomplete.
   final RestoreState restoreState;
 
+  /// Start to finish, PAUSES INCLUDED: it keeps running until the session finishes ([activeTime] is the workout
+  /// clock without the pauses).
+  final Duration elapsedTime;
+
+  /// Calendar time credited after the process died and came back (summed). The person's movement in it is
+  /// unknown, so no distance was invented for it; the silence is part of [uncreditedGap].
+  final Duration recoveredGap;
+
+  /// The calendar clock went backwards across a recovery: that gap could not be measured and counted as zero.
+  final bool clockAnomaly;
+
+  /// Whether location is actually being collected now. After a recovery this can be
+  /// [CollectionState.blocked] while the clock is back: do not present such a recording as measuring.
+  final CollectionState collection;
+
   /// The journal was recorded with other engine rules than this code's: the
   /// restored numbers may differ from what was shown live.
   final bool engineChanged;
@@ -183,6 +206,10 @@ class TrackingSnapshot {
           other.journalFailed == journalFailed &&
           other.restoreState == restoreState &&
           other.engineChanged == engineChanged &&
+          other.elapsedTime == elapsedTime &&
+          other.recoveredGap == recoveredGap &&
+          other.clockAnomaly == clockAnomaly &&
+          other.collection == collection &&
           other.distanceEligibleSteps == distanceEligibleSteps &&
           other.activeTime == activeTime &&
           other.bridgedGap == bridgedGap &&
@@ -216,6 +243,10 @@ class TrackingSnapshot {
         journalFailed,
         restoreState,
         engineChanged,
+        elapsedTime,
+        recoveredGap,
+        clockAnomaly,
+        collection,
         distanceEligibleSteps,
         activeTime,
         bridgedGap,

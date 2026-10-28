@@ -5,14 +5,9 @@ import UIKit
 /// which delivers every result on the main thread and turns every failure into
 /// a `PigeonError` (code, message, details).
 public class FlutterTrackingGpsPlugin: NSObject, FlutterPlugin, TrackingHostApi {
-    /// Process-wide: a recording must not stop because the Flutter engine
-    /// detached. Created on the main thread (CoreLocation needs a run loop).
-    private static let engine: TrackingEngine = {
-        let directory = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("flutter_tracking_gps/journal", isDirectory: true)
-        return TrackingEngine(provider: CoreLocationProvider(), store: FileJournalStore(directory: directory))
-    }()
+    /// Process-wide, owned by `FlutterTrackingGpsRuntime` so the host app can bring a recording back at launch,
+    /// before Flutter exists.
+    private static var engine: TrackingEngine { FlutterTrackingGpsRuntime.engine }
 
     private var eventSink: PigeonEventSink<NativeFix>?
     private var snapshotSink: PigeonEventSink<NativeSnapshot>?
@@ -41,6 +36,10 @@ public class FlutterTrackingGpsPlugin: NSObject, FlutterPlugin, TrackingHostApi 
     }
 
     // MARK: - TrackingHostApi
+
+    func activeSessionId(completion: @escaping (Result<String?, Error>) -> Void) {
+        FlutterTrackingGpsPlugin.engine.activeSessionId(completion: completion)
+    }
 
     func permissionStatus() throws -> NativePermission {
         FlutterTrackingGpsPlugin.engine.permissionStatus()

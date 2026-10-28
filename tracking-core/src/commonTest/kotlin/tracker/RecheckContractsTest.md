@@ -1,5 +1,3 @@
-# RecheckContractsTest
 
-Contract tests from the recheck report: encoding of every separator, unicode and emoji; format versions; every tick durable; step measurement-time validation; weak-interval boundaries; moving time while stationary; the validation boundary (refused inputs are not journaled, nothing throws); per-segment step finality; calendar time of an accepted fix.
 
-`RestorePlanTest`: an impossible CRC-valid record is CORRUPT and dropped before appending; an intact journal needs no rewrite; a version-1 header is migrated (engine version kept, `engineChanged` reported); a finished v1 journal stays read-only.
+`ProcessDeathRecoveryTest`: the dead interval is added to both clocks and the recording continues in a new segment; no distance is invented and the silence is reported; a rebooted monotonic clock changes nothing; paused keeps its active time while elapsed grows; finished is untouched; a backwards calendar clock counts 0; a gap above the limit parks paused; no calendar reference falls back to a plain pause; replay reproduces the clocks and a second recovery at the same moment adds nothing.

@@ -6,6 +6,7 @@ import tracker.journal.JournalCodec
 import tracker.journal.JournalRecord
 import tracker.journal.JournalSink
 import tracker.journal.JournalStatus
+import tracker.journal.RecoveryResult
 import tracker.journal.SessionRecorder
 import tracker.model.FixVerdict
 import tracker.model.TrackingConfig
@@ -53,11 +54,11 @@ class JournalEncodingContractTest {
 }
 
 class JournalVersionContractTest {
-    @Test fun thisCodeWritesFormatVersionTwoAndEngineVersionTwo() {
+    @Test fun thisCodeWritesFormatVersionThreeAndEngineVersionTwo() {
         val sink = RSink()
         SessionRecorder.start(sink, rSettings(), "s", BASE_MS, 0, 0, 0, emptyMap())
         val h = assertNotNull(JournalCodec.decode(sink.lines.first()) as? JournalRecord.Header)
-        assertEquals(2, h.version)
+        assertEquals(3, h.version)
         assertEquals(JournalCodec.ENGINE_VERSION, h.engineVersion)
     }
 
@@ -295,5 +296,237 @@ class RestorePlanTest {
         val plan = SessionRecorder.plan(lines)
         assertFalse(plan.migrated)
         assertFalse(plan.needsRewrite)
+    }
+}
+
+
+class ProcessDeathRecoveryTest {
+    private val wall0 = 1_700_000_000_000L
+
+    /** A session that ran [seconds] at 2 m/s, with calendar time on every tick. */
+    private fun ran(seconds: Int): List<String> {
+        val sink = RSink()
+        val r = SessionRecorder.start(sink, rSettings(), "s", ms(0.0), wall0, 0, 0, emptyMap())
+        for (t in 1..seconds) {
+            RecorderFix(r, t.toLong(), t.toDouble(), t * 2.0)
+            r.onTick(ms(t.toDouble()), wall0 + t * 1000L)
+        }
+        return sink.lines
+    }
+
+    private fun recoverAt(lines: List<String>, nowMono: Long, nowWall: Long, maxGap: Long = 0): Pair<SessionRecorder, RecoveryResult> {
+        val restored = SessionRecorder.restore(RSink(), lines, false)
+        val rec = assertNotNull(restored.recorder)
+        assertTrue(restored.wasRunning || rec.snapshot().state != 1)
+        return rec to rec.recoverAfterProcessDeath(nowMono, nowWall, maxGap)
+    }
+
+    @Test fun theDeadIntervalIsAddedToBothClocksAndTheRecordingContinuesInANewSegment() {
+        val lines = ran(10)
+        val (rec, result) = recoverAt(lines, ms(13.0), wall0 + 13_000)
+        assertTrue(result.recovered)
+        assertEquals(3_000, result.gapMs)
+        val s = rec.snapshot()
+        assertEquals(13_000, s.activeTimeMs)
+        assertEquals(13_000, rec.elapsedTimeMs(ms(13.0)))
+        assertEquals(1, s.segmentId, "a NEW segment: nothing is bridged across the dead interval")
+        assertEquals(1, s.state)
+        // Live inputs continue on the same time line.
+        rec.onTick(ms(14.0), wall0 + 14_000)
+        assertEquals(14_000, rec.snapshot().activeTimeMs)
+    }
+
+    @Test fun noDistanceIsInventedForTheDeadInterval() {
+        val lines = ran(10)
+        val before = SessionRecorder.restore(RSink(), lines).recorder!!.snapshot().totalMeters
+        val (rec, _) = recoverAt(lines, ms(40.0), wall0 + 40_000)
+        assertEquals(before, rec.snapshot().totalMeters, 1e-9)
+        assertTrue(rec.snapshot().uncreditedGapMs >= 30_000, "the silence is REPORTED, not hidden: ${rec.snapshot().uncreditedGapMs}")
+    }
+
+    @Test fun aRebootedMonotonicClockDoesNotChangeTheResult() {
+        val lines = ran(10)
+        val (rec, result) = recoverAt(lines, 50L, wall0 + 13_000) // monotonic restarted from ~0
+        assertTrue(result.recovered)
+        assertEquals(13_000, rec.snapshot().activeTimeMs)
+        rec.onTick(1_050L, wall0 + 14_000)
+        assertEquals(14_000, rec.snapshot().activeTimeMs)
+    }
+
+    @Test fun aPausedSessionKeepsItsActiveTimeButItsElapsedTimeKeepsGrowing() {
+        val sink = RSink()
+        val r = SessionRecorder.start(sink, rSettings(), "s", ms(0.0), wall0, 0, 0, emptyMap())
+        for (t in 1..10) { RecorderFix(r, t.toLong(), t.toDouble(), t * 2.0); r.onTick(ms(t.toDouble()), wall0 + t * 1000L) }
+        r.pause(ms(10.0))
+        val (rec, result) = recoverAt(sink.lines, ms(70.0), wall0 + 70_000)
+        assertTrue(result.recovered)
+        assertEquals(10_000, rec.snapshot().activeTimeMs, "pauses are not workout time")
+        assertEquals(70_000, rec.elapsedTimeMs(ms(70.0)), "elapsed includes the pause and the dead interval")
+        assertEquals(2, rec.snapshot().state, "it stays paused")
+    }
+
+    @Test fun aFinishedSessionIsNotChanged() {
+        val lines = ran(10) + JournalCodec.encode(JournalRecord.Finish(ms(10.0)))
+        val restored = SessionRecorder.restore(RSink(), lines, false)
+        val result = restored.recorder!!.recoverAfterProcessDeath(ms(500.0), wall0 + 500_000, 0)
+        assertFalse(result.recovered)
+        assertEquals(10_000, restored.recorder!!.snapshot().activeTimeMs)
+        assertEquals(10_000, restored.recorder!!.elapsedTimeMs(ms(500.0)), "frozen at the finish")
+    }
+
+    @Test fun aCalendarClockThatWentBackwardsCountsZeroAndIsFlagged() {
+        val (rec, result) = recoverAt(ran(10), ms(11.0), wall0 + 5_000)
+        assertTrue(result.recovered)
+        assertEquals(0, result.gapMs)
+        assertTrue(result.clockAnomaly)
+        assertTrue(rec.clockAnomaly)
+        assertEquals(10_000, rec.snapshot().activeTimeMs)
+    }
+
+    @Test fun aGapAboveTheLimitIsNotCreditedAndTheSessionIsParkedPaused() {
+        val (rec, result) = recoverAt(ran(10), ms(10.0 + 3_600), wall0 + 10_000 + 3_600_000, maxGap = 600_000)
+        assertFalse(result.recovered)
+        assertTrue(result.gapTooLong)
+        assertEquals(10_000, rec.snapshot().activeTimeMs)
+        assertEquals(2, rec.snapshot().state)
+    }
+
+    @Test fun aSessionWithoutCalendarTimeFallsBackToThePlainPause() {
+        val sink = RSink()
+        val r = SessionRecorder.start(sink, rSettings(), "s", ms(0.0), -1L, 0, 0, emptyMap())
+        for (t in 1..5) { RecorderFix(r, t.toLong(), t.toDouble(), t * 2.0, wall = -1_000_000L); r.onTick(ms(t.toDouble())) }
+        val (rec, result) = recoverAt(sink.lines, ms(100.0), wall0)
+        assertFalse(result.recovered)
+        assertEquals(2, rec.snapshot().state)
+    }
+
+    @Test fun restoringARecoveredJournalReproducesTheSameClocksAndRecoveringAgainAddsNothing() {
+        val lines = ran(10)
+        val firstSink = RSink()
+        val restored = SessionRecorder.restore(firstSink, lines, false)
+        val rec = restored.recorder!!
+        rec.recoverAfterProcessDeath(ms(13.0), wall0 + 13_000, 0)
+        val all = lines + firstSink.lines
+        // Replay: same numbers, deterministically.
+        val replay = SessionRecorder.restore(RSink(), all).recorder!!
+        assertEquals(13_000, replay.snapshot().activeTimeMs)
+        assertEquals(3_000, replay.recoveredGapMs)
+        // A second process death at the SAME calendar moment adds nothing.
+        val again = SessionRecorder.restore(RSink(), all, false).recorder!!
+        val second = again.recoverAfterProcessDeath(ms(13.0), wall0 + 13_000, 0)
+        assertEquals(13_000, again.snapshot().activeTimeMs)
+        assertEquals(0, second.gapMs)
+    }
+
+    @Test fun version2JournalsStillRestoreAndTicksWithoutCalendarTimeDecode() {
+        assertEquals(JournalRecord.Tick(5), JournalCodec.decode(JournalCodec.encode(JournalRecord.Tick(5))))
+        assertEquals(JournalRecord.Tick(5, 99), JournalCodec.decode(JournalCodec.encode(JournalRecord.Tick(5, 99))))
+        val q = JournalRecord.Recovered(100, -40, 3_000, true, 1, true, 123)
+        assertEquals(q, JournalCodec.decode(JournalCodec.encode(q)))
+    }
+
+    // ── The independent reviewer's probes (each failed before the clock fix) ─────────────────────────────
+
+    @Test fun aFixMeasuredEarlierButReceivedLaterDoesNotMakeTheGapCountTwice() {
+        val sink = RSink()
+        val r = SessionRecorder.start(sink, rSettings(), "s", ms(0.0), wall0, 0, 0, emptyMap())
+        // measured at t=10 (wall0+10 s), RECEIVED at t=15
+        r.onFix("s", 0, 1, ms(10.0), wall0 + 10_000, 10.0, 106.0, 5.0, 3.0, -1.0, -1.0, 0.0, -1.0, "gps", false, ms(15.0))
+        val (rec, _) = recoverAt(sink.lines, ms(18.0), wall0 + 18_000)
+        assertEquals(18_000, rec.elapsedTimeMs(ms(18.0)), "not 23 s: the receive time must not be paired with the measure wall time")
+    }
+
+    @Test fun aPauseAfterTheLastTickDoesNotAddItsOwnOffsetToTheGap() {
+        val sink = RSink()
+        val r = SessionRecorder.start(sink, rSettings(), "s", ms(0.0), wall0, 0, 0, emptyMap())
+        r.onTick(ms(10.0), wall0 + 10_000)
+        r.pause(ms(10.5))
+        val (rec, _) = recoverAt(sink.lines, ms(13.5), wall0 + 13_500)
+        assertEquals(13_500, rec.elapsedTimeMs(ms(13.5)))
+    }
+
+    @Test fun aPausedSessionRecoveredTwiceNeverGoesBackwards() {
+        val sink = RSink()
+        val r = SessionRecorder.start(sink, rSettings(), "s", ms(0.0), wall0, 0, 0, emptyMap())
+        for (t in 1..10) r.onTick(ms(t.toDouble()), wall0 + t * 1000L)
+        r.pause(ms(10.0))
+        val firstSink = RSink()
+        val first = SessionRecorder.restore(firstSink, sink.lines, false).recorder!!
+        first.recoverAfterProcessDeath(ms(20.0), wall0 + 20_000, 0)
+        assertEquals(20_000, first.elapsedTimeMs(ms(20.0)))
+        val all = sink.lines + firstSink.lines
+        val second = SessionRecorder.restore(RSink(), all, false).recorder!!
+        second.recoverAfterProcessDeath(ms(25.0), wall0 + 25_000, 0)
+        assertEquals(25_000, second.elapsedTimeMs(ms(25.0)), "not 15 s")
+    }
+
+    @Test fun aCrashRightAfterTheRecoveredRecordWasWrittenLosesNothing() {
+        val lines = ran(10)
+        val firstSink = RSink()
+        val first = SessionRecorder.restore(firstSink, lines, false).recorder!!
+        first.recoverAfterProcessDeath(ms(20.0), wall0 + 20_000, 0)
+        // Keep ONLY the recovered record (the process died before anything that followed it was written).
+        val onlyQ = firstSink.lines.filter { (JournalCodec.decode(it) is JournalRecord.Recovered) }
+        assertEquals(1, onlyQ.size)
+        val second = SessionRecorder.restore(RSink(), lines + onlyQ, false).recorder!!
+        second.recoverAfterProcessDeath(ms(25.0), wall0 + 25_000, 0)
+        assertEquals(25_000, second.snapshot().activeTimeMs, "not 15 s")
+    }
+
+    @Test fun aShortDeadIntervalWhileGpsWasGoodIsStillReportedAsUncredited() {
+        val (rec, result) = recoverAt(ran(10), ms(13.0), wall0 + 13_000)
+        assertEquals(3_000, result.gapMs)
+        assertEquals(3_000, rec.snapshot().uncreditedGapMs, "the interruption is explicit, not only a GPS-silence threshold")
+        assertEquals(1, rec.snapshot().uncreditedGaps)
+    }
+
+    @Test fun aRecoveredRecordWithANegativeGapIsRefused() {
+        val lines = ran(10) + JournalCodec.encode(JournalRecord.Recovered(15_000, 5_000, -1_000, true, 1, false, wall0 + 15_000))
+        val restored = SessionRecorder.restore(RSink(), lines)
+        assertEquals(JournalStatus.CORRUPT, restored.status)
+    }
+
+    // ── Second round of the reviewer's probes ────────────────────────────────────────────────────────────
+
+    @Test fun aFixTheCoreRefusedForItsTimeIsNoEvidenceOfWhatTimeItIs() {
+        val sink = RSink()
+        val r = SessionRecorder.start(sink, rSettings(), "s", ms(0.0), wall0, 0, 0, emptyMap())
+        r.onTick(ms(10.0), wall0 + 10_000)
+        // measured at t=100 but RECEIVED at t=10: dated in the future
+        r.onFix("s", 0, 1, ms(100.0), wall0 + 100_000, 10.0, 106.0, 5.0, 3.0, -1.0, -1.0, 0.0, -1.0, "gps", false, ms(10.0))
+        val (rec, _) = recoverAt(sink.lines, ms(13.0), wall0 + 13_000)
+        assertEquals(13_000, rec.elapsedTimeMs(ms(13.0)), "not 100 s")
+    }
+
+    @Test fun aFixOfAnotherSegmentIsNoEvidenceEither() {
+        val sink = RSink()
+        val r = SessionRecorder.start(sink, rSettings(), "s", ms(0.0), wall0, 0, 0, emptyMap())
+        r.onTick(ms(10.0), wall0 + 10_000)
+        r.onFix("s", 7, 1, ms(9.0), wall0 + 99_000, 10.0, 106.0, 5.0, 3.0, -1.0, -1.0, 0.0, -1.0, "gps", false, ms(10.0))
+        val (rec, _) = recoverAt(sink.lines, ms(13.0), wall0 + 13_000)
+        assertEquals(13_000, rec.elapsedTimeMs(ms(13.0)))
+    }
+
+    @Test fun theRestoredSegmentIsTheCoresAfterARecoveredJournal() {
+        val lines = ran(10)
+        val firstSink = RSink()
+        val first = SessionRecorder.restore(firstSink, lines, false).recorder!!
+        first.recoverAfterProcessDeath(ms(13.0), wall0 + 13_000, 0)
+        val all = lines + firstSink.lines
+        val restored = SessionRecorder.restore(RSink(), all) // a plain restore
+        assertEquals(restored.recorder!!.snapshot().segmentId, restored.segmentId, "the result must match the core")
+        assertEquals(1, restored.segmentId)
+        // And a resume with the NEXT segment works.
+        restored.recorder!!.resume(ms(20.0), restored.segmentId + 1)
+        assertEquals(1, restored.recorder!!.snapshot().state, "recording again")
+    }
+
+    @Test fun aRefusedRecoveredRecordLeavesTheValidPrefixUntouched() {
+        val lines = ran(10)
+        val bad = JournalCodec.encode(JournalRecord.Recovered(15_000, 5_000, 5_000, true, 0, false, wall0 + 15_000)) // reuses segment 0
+        val clean = SessionRecorder.restore(RSink(), lines).recorder!!.snapshot().activeTimeMs
+        val restored = SessionRecorder.restore(RSink(), lines + bad)
+        assertEquals(JournalStatus.CORRUPT, restored.status)
+        assertEquals(clean, restored.recorder!!.snapshot().activeTimeMs, "the prefix's result, not 15 s")
     }
 }

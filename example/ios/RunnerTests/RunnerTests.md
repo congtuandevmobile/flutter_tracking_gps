@@ -1,11 +1,3 @@
-# RunnerTests.swift
 
-Engine tests with a fake location provider, a fake step provider (with held and failing exact queries) and an in-memory journal store: lifecycle; the missing background mode error; permission denied; distance through the Kotlin core; fixes numbered, journaled and delivered; an invalid coordinate is not forwarded; pause/resume never bridge; a location measured before the new leg is ignored; a shaken phone adds nothing; adaptive sampling; restore replays the journal and comes back paused with the same result, using the header's configuration; a damaged last record is dropped and the journal repaired; nothing to restore fails; an open session cannot be cleared and sessions are listed; steps: weak-GPS steps become pending (not distance), steps off, a missing permission or Info.plist key only disable steps and say why, a runtime CoreMotion error is reported not swallowed, pause ends the subscription and the exact count corrects the total, resume starts a fresh count, `stop` WAITS for the exact count and returns a final snapshot with a durable journal, a failed exact query is not final and says why, finishing from pause still waits, and a late answer for an older session never touches the new one (identity).
 
-Added: `stop` is `.finishing` (steps not final) until the exact count is in and the journal durable; the snapshot reports events not on disk; damage in the middle keeps a backup; a journal of another engine version is restored but flagged.
-
-Added: a finished session restores as stopped with its finality (exact, or provisional after a failed exact query); a late second exact answer never changes a published final result; the restore outcome is a structured field.
-
-## Recheck update
-
-Added scenarios: double stop joins one finalization, a new start supersedes an old finish (explicit failure, nothing leaks), a provisional segment is not upgraded by a later exact one, a journal write failure is never durable, a late location error after pause is ignored.
+Process-death recovery: the open-session pointer, a recovered session collecting again with the dead interval credited and no distance invented, a paused session whose elapsed time keeps growing, and a recording that cannot start location saying `blocked`.

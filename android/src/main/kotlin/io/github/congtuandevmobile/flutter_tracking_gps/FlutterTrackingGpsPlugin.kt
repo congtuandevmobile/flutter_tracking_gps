@@ -288,6 +288,10 @@ class FlutterTrackingGpsPlugin :
             journalFailed = false,
             restoreState = NativeRestoreState.NOT_RESTORED,
             engineChanged = false,
+            elapsedTimeMs = 0,
+            recoveredGapMs = 0,
+            clockAnomaly = false,
+            collection = NativeCollection.NOT_COLLECTING,
         )
         return TrackingRuntime.engine(context).snapshot()
     }
@@ -298,8 +302,29 @@ class FlutterTrackingGpsPlugin :
     }
 
     override fun restoreSession(config: StartConfig, callback: (Result<NativeSnapshot>) -> Unit) {
-        command(callback, TrackingErrorCode.RESTORE_FAILED, "could not restore the session") { _, engine ->
-            engine.restore(config)
+        command(callback, TrackingErrorCode.RESTORE_FAILED, "could not restore the session") { context, engine ->
+            if (!config.recoverRunning) return@command engine.restore(config)
+            // A recording that continues needs the foreground service BEFORE location starts (as a resume does). When
+            // this process already holds the session (the service recovered it without Flutter) nothing is replayed.
+            val live = engine.snapshot()
+            if (live.sessionId == config.sessionId && live.state == NativeTrackingState.RUNNING) {
+                return@command live
+            }
+            startForegroundAndWait(context, config.notificationTitle, config.notificationText)
+            val snapshot = try {
+                engine.restore(config)
+            } catch (e: Throwable) {
+                stopService(context)
+                throw e
+            }
+            if (snapshot.state != NativeTrackingState.RUNNING) stopService(context)
+            snapshot
+        }
+    }
+
+    override fun activeSessionId(callback: (Result<String?>) -> Unit) {
+        command(callback, TrackingErrorCode.STORE_READ_FAILED, "could not read the open session") { _, engine ->
+            engine.activeSessionId()
         }
     }
 

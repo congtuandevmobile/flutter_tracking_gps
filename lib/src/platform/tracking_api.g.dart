@@ -158,6 +158,15 @@ enum NativeGpsQuality {
   recovering,
 }
 
+enum NativeCollection {
+  /// Location is being collected.
+  collecting,
+  /// The session is not recording (idle, paused, finished).
+  notCollecting,
+  /// The session should be recording but location cannot be collected (permission, service refused).
+  blocked,
+}
+
 /// One raw location reading, exactly as the platform produced it. No filter,
 /// no smoothing, no odometer: the Dart engine decides what counts as distance.
 class NativeFix {
@@ -421,6 +430,8 @@ class EngineConfig {
 
 class StartConfig {
   StartConfig({
+    required this.recoverRunning,
+    required this.maxRecoverGapMs,
     required this.stepsEnabled,
     required this.initialSteps,
     required this.engine,
@@ -434,6 +445,14 @@ class StartConfig {
     required this.notificationTitle,
     required this.notificationText,
   });
+
+  /// Restore only: continue a session that was RECORDING when its process died, crediting the calendar time that
+  /// passed (see `SessionRecorder.recoverAfterProcessDeath`). False restores it paused at its last event.
+  bool recoverRunning;
+
+  /// Restore with [recoverRunning]: a dead interval longer than this is NOT credited and the session is parked
+  /// paused instead. 0 = no limit.
+  int maxRecoverGapMs;
 
   /// Count steps natively (Android `TYPE_STEP_COUNTER`, iOS `CMPedometer`) and
   /// let the engine turn them into a pending estimate while GPS is weak. Without
@@ -480,6 +499,8 @@ class StartConfig {
 
   List<Object?> _toList() {
     return <Object?>[
+      recoverRunning,
+      maxRecoverGapMs,
       stepsEnabled,
       initialSteps,
       engine,
@@ -501,18 +522,20 @@ class StartConfig {
   static StartConfig decode(Object result) {
     result as List<Object?>;
     return StartConfig(
-      stepsEnabled: result[0]! as bool,
-      initialSteps: result[1]! as int,
-      engine: result[2]! as EngineConfig,
-      adaptiveSampling: result[3]! as bool,
-      batterySaver: result[4]! as bool,
-      sessionId: result[5]! as String,
-      startSeq: result[6]! as int,
-      startSegmentId: result[7]! as int,
-      intervalMs: result[8]! as int,
-      minDistanceMeters: result[9]! as double,
-      notificationTitle: result[10]! as String,
-      notificationText: result[11]! as String,
+      recoverRunning: result[0]! as bool,
+      maxRecoverGapMs: result[1]! as int,
+      stepsEnabled: result[2]! as bool,
+      initialSteps: result[3]! as int,
+      engine: result[4]! as EngineConfig,
+      adaptiveSampling: result[5]! as bool,
+      batterySaver: result[6]! as bool,
+      sessionId: result[7]! as String,
+      startSeq: result[8]! as int,
+      startSegmentId: result[9]! as int,
+      intervalMs: result[10]! as int,
+      minDistanceMeters: result[11]! as double,
+      notificationTitle: result[12]! as String,
+      notificationText: result[13]! as String,
     );
   }
 
@@ -525,7 +548,7 @@ class StartConfig {
     if (identical(this, other)) {
       return true;
     }
-    return _deepEquals(stepsEnabled, other.stepsEnabled) && _deepEquals(initialSteps, other.initialSteps) && _deepEquals(engine, other.engine) && _deepEquals(adaptiveSampling, other.adaptiveSampling) && _deepEquals(batterySaver, other.batterySaver) && _deepEquals(sessionId, other.sessionId) && _deepEquals(startSeq, other.startSeq) && _deepEquals(startSegmentId, other.startSegmentId) && _deepEquals(intervalMs, other.intervalMs) && _deepEquals(minDistanceMeters, other.minDistanceMeters) && _deepEquals(notificationTitle, other.notificationTitle) && _deepEquals(notificationText, other.notificationText);
+    return _deepEquals(recoverRunning, other.recoverRunning) && _deepEquals(maxRecoverGapMs, other.maxRecoverGapMs) && _deepEquals(stepsEnabled, other.stepsEnabled) && _deepEquals(initialSteps, other.initialSteps) && _deepEquals(engine, other.engine) && _deepEquals(adaptiveSampling, other.adaptiveSampling) && _deepEquals(batterySaver, other.batterySaver) && _deepEquals(sessionId, other.sessionId) && _deepEquals(startSeq, other.startSeq) && _deepEquals(startSegmentId, other.startSegmentId) && _deepEquals(intervalMs, other.intervalMs) && _deepEquals(minDistanceMeters, other.minDistanceMeters) && _deepEquals(notificationTitle, other.notificationTitle) && _deepEquals(notificationText, other.notificationText);
   }
 
   @override
@@ -682,6 +705,10 @@ class NativeSnapshot {
     required this.engineChanged,
     required this.journalPending,
     required this.journalFailed,
+    required this.elapsedTimeMs,
+    required this.recoveredGapMs,
+    required this.clockAnomaly,
+    required this.collection,
     required this.stepsFinal,
     this.sessionId,
     required this.state,
@@ -713,6 +740,19 @@ class NativeSnapshot {
   /// [journalPending] says, and the recording must be treated as not durable.
   bool journalFailed;
 
+  /// Start to finish, PAUSES INCLUDED (it keeps running until the session finishes).
+  int elapsedTimeMs;
+
+  /// Calendar time that passed while the process was dead, credited by a recovery (summed). 0 when none.
+  int recoveredGapMs;
+
+  /// The calendar clock went backwards across a recovery: that gap could not be measured and counted as 0.
+  bool clockAnomaly;
+
+  /// Whether native is actually collecting location now, separate from what the person asked for: a recovered
+  /// session can have its clock back while collection is blocked (permission, foreground service refused).
+  NativeCollection collection;
+
   /// True when the step total is final: after `stop`, the platform's exact count
   /// for the closed segment was obtained (or there is no step sensor). False
   /// means the total is the live count, which may still be corrected.
@@ -743,6 +783,10 @@ class NativeSnapshot {
       engineChanged,
       journalPending,
       journalFailed,
+      elapsedTimeMs,
+      recoveredGapMs,
+      clockAnomaly,
+      collection,
       stepsFinal,
       sessionId,
       state,
@@ -766,15 +810,19 @@ class NativeSnapshot {
       engineChanged: result[2]! as bool,
       journalPending: result[3]! as int,
       journalFailed: result[4]! as bool,
-      stepsFinal: result[5]! as bool,
-      sessionId: result[6] as String?,
-      state: result[7]! as NativeTrackingState,
-      segmentId: result[8]! as int,
-      distance: result[9]! as NativeDistance,
-      fixCount: result[10]! as int,
-      lastFixTimeMs: result[11] as int?,
-      updatedAtMs: result[12]! as int,
-      error: result[13] as String?,
+      elapsedTimeMs: result[5]! as int,
+      recoveredGapMs: result[6]! as int,
+      clockAnomaly: result[7]! as bool,
+      collection: result[8]! as NativeCollection,
+      stepsFinal: result[9]! as bool,
+      sessionId: result[10] as String?,
+      state: result[11]! as NativeTrackingState,
+      segmentId: result[12]! as int,
+      distance: result[13]! as NativeDistance,
+      fixCount: result[14]! as int,
+      lastFixTimeMs: result[15] as int?,
+      updatedAtMs: result[16]! as int,
+      error: result[17] as String?,
     );
   }
 
@@ -787,7 +835,7 @@ class NativeSnapshot {
     if (identical(this, other)) {
       return true;
     }
-    return _deepEquals(stepsStatus, other.stepsStatus) && _deepEquals(restoreState, other.restoreState) && _deepEquals(engineChanged, other.engineChanged) && _deepEquals(journalPending, other.journalPending) && _deepEquals(journalFailed, other.journalFailed) && _deepEquals(stepsFinal, other.stepsFinal) && _deepEquals(sessionId, other.sessionId) && _deepEquals(state, other.state) && _deepEquals(segmentId, other.segmentId) && _deepEquals(distance, other.distance) && _deepEquals(fixCount, other.fixCount) && _deepEquals(lastFixTimeMs, other.lastFixTimeMs) && _deepEquals(updatedAtMs, other.updatedAtMs) && _deepEquals(error, other.error);
+    return _deepEquals(stepsStatus, other.stepsStatus) && _deepEquals(restoreState, other.restoreState) && _deepEquals(engineChanged, other.engineChanged) && _deepEquals(journalPending, other.journalPending) && _deepEquals(journalFailed, other.journalFailed) && _deepEquals(elapsedTimeMs, other.elapsedTimeMs) && _deepEquals(recoveredGapMs, other.recoveredGapMs) && _deepEquals(clockAnomaly, other.clockAnomaly) && _deepEquals(collection, other.collection) && _deepEquals(stepsFinal, other.stepsFinal) && _deepEquals(sessionId, other.sessionId) && _deepEquals(state, other.state) && _deepEquals(segmentId, other.segmentId) && _deepEquals(distance, other.distance) && _deepEquals(fixCount, other.fixCount) && _deepEquals(lastFixTimeMs, other.lastFixTimeMs) && _deepEquals(updatedAtMs, other.updatedAtMs) && _deepEquals(error, other.error);
   }
 
   @override
@@ -818,20 +866,23 @@ class _PigeonCodec extends StandardMessageCodec {
     }    else if (value is NativeGpsQuality) {
       buffer.putUint8(133);
       writeValue(buffer, value.index);
-    }    else if (value is NativeFix) {
+    }    else if (value is NativeCollection) {
       buffer.putUint8(134);
-      writeValue(buffer, value.encode());
-    }    else if (value is EngineConfig) {
+      writeValue(buffer, value.index);
+    }    else if (value is NativeFix) {
       buffer.putUint8(135);
       writeValue(buffer, value.encode());
-    }    else if (value is StartConfig) {
+    }    else if (value is EngineConfig) {
       buffer.putUint8(136);
       writeValue(buffer, value.encode());
-    }    else if (value is NativeDistance) {
+    }    else if (value is StartConfig) {
       buffer.putUint8(137);
       writeValue(buffer, value.encode());
-    }    else if (value is NativeSnapshot) {
+    }    else if (value is NativeDistance) {
       buffer.putUint8(138);
+      writeValue(buffer, value.encode());
+    }    else if (value is NativeSnapshot) {
+      buffer.putUint8(139);
       writeValue(buffer, value.encode());
     } else {
       super.writeValue(buffer, value);
@@ -857,14 +908,17 @@ class _PigeonCodec extends StandardMessageCodec {
         final value = readValue(buffer) as int?;
         return value == null ? null : NativeGpsQuality.values[value];
       case 134:
-        return NativeFix.decode(readValue(buffer)!);
+        final value = readValue(buffer) as int?;
+        return value == null ? null : NativeCollection.values[value];
       case 135:
-        return EngineConfig.decode(readValue(buffer)!);
+        return NativeFix.decode(readValue(buffer)!);
       case 136:
-        return StartConfig.decode(readValue(buffer)!);
+        return EngineConfig.decode(readValue(buffer)!);
       case 137:
-        return NativeDistance.decode(readValue(buffer)!);
+        return StartConfig.decode(readValue(buffer)!);
       case 138:
+        return NativeDistance.decode(readValue(buffer)!);
+      case 139:
         return NativeSnapshot.decode(readValue(buffer)!);
       default:
         return super.readValueOfType(type, buffer);
@@ -1113,6 +1167,27 @@ class TrackingHostApi {
     )
     ;
     return pigeonVar_replyValue! as NativeSnapshot;
+  }
+
+  /// The id of the session that was recording or paused when it was last seen (the open-session pointer), or null.
+  /// Written when a session starts, removed when it finishes or is cleared.
+  Future<String?> activeSessionId() async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.flutter_tracking_gps.TrackingHostApi.activeSessionId$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(null);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+
+    final Object? pigeonVar_replyValue = _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: true,
+    )
+    ;
+    return pigeonVar_replyValue as String?;
   }
 
   /// Coordinate-free timeline of what the native engine decided.

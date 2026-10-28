@@ -73,6 +73,8 @@ final class TrackingEngine: LocationProviderDelegate {
     private var extras: [String: String] = [:]
     private var legStartMono: Int64 = 0
     private var permissionWaiters: [(NativePermission) -> Void] = []
+    /// Location updates failed (permission revoked, provider error): a recording that cannot collect says so.
+    private var collectorFailed = false
 
     // Steps.
     private var stepsEnabled = false
@@ -185,6 +187,8 @@ final class TrackingEngine: LocationProviderDelegate {
             let newExtras = [
                 "intervalMs": String(config.intervalMs), "minDistanceMeters": String(config.minDistanceMeters),
                 "stepsEnabled": String(config.stepsEnabled),
+                // Kept in the journal so a recovery without Flutter knows the limit the app chose.
+                "maxRecoverGapMs": String(config.maxRecoverGapMs),
             ]
             let now = self.monotonicMs()
             let started = SessionRecorder.Companion.shared.tryStart(
@@ -201,6 +205,18 @@ final class TrackingEngine: LocationProviderDelegate {
                     to: completion)
                 return
             }
+            do { try self.store.markActive(config.sessionId) } catch {
+                // Without the pointer a recovery could never find this session: starting would only look like it works.
+                self.store.release(config.sessionId)
+                try? self.store.clear(config.sessionId)
+                self.deliver(
+                    .failure(trackingError(
+                        code: TrackingErrorCode.startFailed, message: "could not write the open-session pointer",
+                        underlying: error)),
+                    to: completion)
+                return
+            }
+            self.collectorFailed = false
             self.recorder = recorder
             self.sink = sink
             self.sessionId = config.sessionId
@@ -266,6 +282,36 @@ final class TrackingEngine: LocationProviderDelegate {
                 self.recorder?.pause(atMs: self.monotonicMs())
                 self.closeStepSegment(completion: nil)
                 self.publish()
+                // Acknowledged only once the pause is DURABLE: a process killed right after the call must not come
+                // back recording what the person had just paused.
+                let recorder = self.recorder
+                let token = self.sessionToken
+                let pausedId = id
+                self.storeQueue.async { [weak self] in
+                    let durable = recorder?.flush() ?? true
+                    self?.queue.async { [weak self] in
+                        guard let self = self else { return }
+                        // The session may have been replaced while the pause was being persisted: never answer a
+                        // pause with another session's snapshot.
+                        guard token == self.sessionToken, pausedId == self.sessionId else {
+                            self.deliver(
+                                .failure(trackingError(
+                                    code: TrackingErrorCode.superseded,
+                                    message: "the session changed while the pause was being persisted")),
+                                to: completion)
+                            return
+                        }
+                        if durable {
+                            self.deliver(.success(self.makeSnapshot()), to: completion)
+                        } else {
+                            self.deliver(
+                                .failure(trackingError(
+                                    code: TrackingErrorCode.pauseFailed, message: "the pause could not be persisted")),
+                                to: completion)
+                        }
+                    }
+                }
+                return
             }
             self.deliver(.success(self.makeSnapshot()), to: completion)
         }
@@ -349,6 +395,7 @@ final class TrackingEngine: LocationProviderDelegate {
                         self.liveStepsFinal = settled
                         self.state = .stopped
                         self.finishOp = nil
+                        self.store.clearActive(finishedId)
                         self.storeQueue.async { [weak self] in self?.store.release(finishedId) }
                         self.publish()
                         self.finish(op, with: .success(self.makeSnapshot()))
@@ -400,11 +447,49 @@ final class TrackingEngine: LocationProviderDelegate {
     /// the journal repaired so new records can be appended; damage in the middle keeps only the intact part
     /// and says so in the snapshot. If this session already runs, nothing is replayed.
     func restore(config: StartConfig, completion: @escaping (Result<NativeSnapshot, Error>) -> Void) {
+        restoreSession(
+            id: config.sessionId, defaultMinDistance: config.minDistanceMeters,
+            recover: config.recoverRunning, maxGapMs: config.maxRecoverGapMs, completion: completion)
+    }
+
+    /// The id of the session that was recording or paused when it was last seen (the open-session pointer), or nil.
+    func activeSessionId(completion: @escaping (Result<String?, Error>) -> Void) {
+        storeQueue.async { [weak self] in
+            guard let self = self else { return }
+            self.deliver(.success(self.store.activeId()), to: completion)
+        }
+    }
+
+    /// Process-death recovery WITHOUT Flutter: finds the open session and continues it. Delivers nil when there is
+    /// none, and the live snapshot when this process already holds it (nothing is replayed twice).
+    func recoverActive(maxGapMs: Int64 = -1, completion: @escaping (Result<NativeSnapshot?, Error>) -> Void) {
+        // The token is taken on the engine queue, BEFORE any I/O: if anything starts or replaces a session while the
+        // pointer and the journal are being read, the recovery decided earlier must not commit.
+        queue.async { [weak self] in
+            guard let self = self else { return }
+            let token = self.sessionToken
+            self.storeQueue.async { [weak self] in
+                guard let self = self else { return }
+                guard let id = self.store.activeId() else {
+                    self.deliver(.success(nil), to: completion)
+                    return
+                }
+                self.restoreSession(id: id, defaultMinDistance: 0, recover: true, maxGapMs: maxGapMs, expectedToken: token) {
+                    result in completion(result.map { Optional($0) })
+                }
+            }
+        }
+    }
+
+    private func restoreSession(
+        id: String, defaultMinDistance: Double, recover: Bool, maxGapMs: Int64, expectedToken: Int? = nil,
+        completion: @escaping (Result<NativeSnapshot, Error>) -> Void
+    ) {
         storeQueue.async { [weak self] in
             guard let self = self else { return }
             let lines: [String]
             do {
-                lines = try self.store.read(config.sessionId)
+                lines = try self.store.read(id)
             } catch {
                 self.deliver(
                     .failure(trackingError(
@@ -416,7 +501,15 @@ final class TrackingEngine: LocationProviderDelegate {
             self.queue.async { [weak self] in
                 guard let self = self else { return }
                 let running = self.state == .running || self.state == .paused || self.state == .finishing
-                if config.sessionId == self.sessionId, running {
+                if id == self.sessionId, running {
+                    self.deliver(.success(self.makeSnapshot()), to: completion)
+                    return
+                }
+                // A recovery never replaces a session this process holds (another id) and never commits after
+                // a session was started or restored meanwhile.
+                if recover, let expected = expectedToken,
+                    expected != self.sessionToken || (running && id != self.sessionId)
+                {
                     self.deliver(.success(self.makeSnapshot()), to: completion)
                     return
                 }
@@ -436,7 +529,7 @@ final class TrackingEngine: LocationProviderDelegate {
                 let usable = plan.lines
                 if plan.needsRewrite {
                     // Damage in the middle (or an old-format header) changes what the file holds: keep the original beside it.
-                    do { try self.store.rewrite(config.sessionId, lines: usable, keepBackup: plan.keepBackup) } catch {
+                    do { try self.store.rewrite(id, lines: usable, keepBackup: plan.keepBackup) } catch {
                         self.deliver(
                             .failure(trackingError(
                                 code: TrackingErrorCode.restoreFailed, message: "could not repair the journal",
@@ -445,8 +538,8 @@ final class TrackingEngine: LocationProviderDelegate {
                         return
                     }
                 }
-                let sink = self.store.open(config.sessionId)
-                let result = SessionRecorder.Companion.shared.restore(sink: sink, lines: usable)
+                let sink = self.store.open(id)
+                let result = SessionRecorder.Companion.shared.restore(sink: sink, lines: usable, pauseIfRunning: !recover)
                 guard let recorder = result.recorder else {
                     self.deliver(
                         .failure(trackingError(
@@ -468,7 +561,7 @@ final class TrackingEngine: LocationProviderDelegate {
                 self.stepsStatus = .off
                 self.stepsEverActive = false
                 self.liveStepsFinal = false
-                self.minDistanceMeters = Double(result.extras["minDistanceMeters"] ?? "") ?? config.minDistanceMeters
+                self.minDistanceMeters = Double(result.extras["minDistanceMeters"] ?? "") ?? defaultMinDistance
                 if result.engineChanged {
                     self.lastError = "\(TrackingErrorCode.engineChanged): the journal was recorded with engine \(result.engineVersion); the replay may differ from what was shown live"
                 }
@@ -492,10 +585,36 @@ final class TrackingEngine: LocationProviderDelegate {
                 } else {
                     self.restoredStepsFinal = nil
                     self.state = .paused
+                    if recover {
+                        // The process died: credit the calendar time that passed and continue in a NEW segment.
+                        // A negative limit means "the one the app chose at start", read from the journal.
+                        let limit = maxGapMs >= 0 ? maxGapMs : (Int64(result.extras["maxRecoverGapMs"] ?? "") ?? 0)
+                        let recovery = recorder.recoverAfterProcessDeath(
+                            nowMonoMs: self.monotonicMs(), nowWallMs: self.wallMs(self.wallNow()), maxGapMs: limit)
+                        self.segmentId = Int64(recovery.segmentId)
+                        if recorder.snapshot().state == 1 /* running */ { self.state = .running }
+                    }
                 }
+                self.collectorFailed = false
+                if self.state == .running { self.resumeCollectingAfterRecovery() }
                 self.publish()
                 self.deliver(.success(self.makeSnapshot()), to: completion)
             }
+        }
+    }
+
+    /// A recovered recording collects again: location, the ticker and the step sensor.
+    private func resumeCollectingAfterRecovery() {
+        legStartMono = monotonicMs()
+        do {
+            try provider.startUpdates(minDistanceMeters: minDistanceMeters)
+            startTicker()
+            beginSteps()
+        } catch {
+            // The session's clock was recovered, but location cannot start: say so, do not look as if recording.
+            collectorFailed = true
+            lastError = "\(TrackingErrorCode.locationFailed): \(error.localizedDescription)"
+            startTicker()
         }
     }
 
@@ -632,6 +751,7 @@ final class TrackingEngine: LocationProviderDelegate {
                 return
             }
             NSLog("[flutter_tracking_gps] location updates failed: %@", String(describing: error))
+            self.collectorFailed = true
             self.lastError = "\(TrackingErrorCode.locationFailed): \(error.localizedDescription)"
             if (error as NSError).domain == kCLErrorDomain, code == CLError.denied.rawValue {
                 self.state = .permissionDenied
@@ -781,7 +901,7 @@ final class TrackingEngine: LocationProviderDelegate {
         timer.schedule(deadline: .now() + 1, repeating: 1)
         timer.setEventHandler { [weak self] in
             guard let self = self, self.state == .running else { return }
-            _ = self.recorder?.onTick(nowMs: self.monotonicMs())
+            _ = self.recorder?.onTick(nowMs: self.monotonicMs(), wallMs: self.wallMs(self.wallNow()))
             self.publish()
         }
         timer.resume()
@@ -803,10 +923,19 @@ final class TrackingEngine: LocationProviderDelegate {
         let finalSteps = state == .stopped && (restoredStepsFinal ?? liveStepsFinal)
         return NativeSnapshot(
             stepsStatus: stepsStatus, restoreState: restoreState, engineChanged: engineChanged,
-            journalPending: Int64(sink?.pending ?? 0), journalFailed: sink?.failure != nil, stepsFinal: finalSteps,
+            journalPending: Int64(sink?.pending ?? 0), journalFailed: sink?.failure != nil,
+            elapsedTimeMs: recorder?.elapsedTimeMs(nowMs: monotonicMs()) ?? 0,
+            recoveredGapMs: recorder?.recoveredGapMs ?? 0, clockAnomaly: recorder?.clockAnomaly ?? false,
+            collection: collection, stepsFinal: finalSteps,
             sessionId: sessionId, state: state, segmentId: segmentId, distance: makeDistance(),
             fixCount: fixCount, lastFixTimeMs: lastFixTimeMs,
             updatedAtMs: wallMs(wallNow()), error: error)
+    }
+
+    /// Whether location is actually being collected, separate from what the person asked for.
+    private var collection: NativeCollection {
+        if collectorFailed && state != .stopped && state != .idle { return .blocked }
+        return state == .running ? .collecting : .notCollecting
     }
 
     private func makeDistance() -> NativeDistance {
@@ -820,7 +949,9 @@ final class TrackingEngine: LocationProviderDelegate {
         default: quality = .unknown
         }
         // The core measures on the monotonic clock; the app wants a calendar time.
-        let lastFixEpoch: Int64 = s.lastFixAtMs >= 0 ? wallMs(wallNow()) - (monotonicMs() - s.lastFixAtMs) : -1
+        // The calendar time was fixed when the fix was ACCEPTED. Recomputing it from the host clock would be off by the
+        // recovery offset after a process death.
+        let lastFixEpoch: Int64 = recorder?.lastAcceptedFixWallMs() ?? -1
         return NativeDistance(
             quality: quality, totalMeters: s.totalMeters, gpsMeters: s.gpsMeters,
             gapBridgeMeters: s.gapBridgeMeters, pdrMeters: s.pdrMeters,

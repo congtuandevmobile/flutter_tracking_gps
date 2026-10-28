@@ -88,6 +88,13 @@ class FakePlatform implements TrackingPlatform {
     return _snap();
   }
 
+  /// The open-session pointer the fake exposes (null = none).
+  String? open;
+  Object? restoreError;
+
+  @override
+  Future<String?> activeSessionId() async => open;
+
   @override
   Future<PlatformSnapshot> restoreSession({
     required String sessionId,
@@ -98,8 +105,12 @@ class FakePlatform implements TrackingPlatform {
     required bool batterySaver,
     required bool stepsEnabled,
     required int initialSteps,
+    bool recoverRunning = false,
+    String notificationTitle = '',
+    String notificationText = '',
   }) async {
-    calls.add('restore');
+    if (restoreError != null) throw restoreError!;
+    calls.add(recoverRunning ? 'restore:recover' : 'restore');
     this.sessionId = sessionId;
     engine = GpsDistanceEngine(config: config)
       ..start(sessionId, persisted.isEmpty ? t0 : persisted.first.time);
@@ -342,5 +353,49 @@ void main() {
     await session.updateNotification(title: 'T', text: 'x');
     expect(platform.calls, contains('notify:T'));
     await session.dispose();
+  });
+
+  test('attachOrRecover returns null when nothing is open', () async {
+    final platform = FakePlatform();
+    final gps = FlutterTrackingGps(platform: platform);
+    expect(await gps.attachOrRecover(), isNull);
+    expect(platform.calls, isNot(contains('restore:recover')));
+  });
+
+  test('attachOrRecover restores the open session asking native to continue it, and never starts it', () async {
+    final platform = FakePlatform()..open = 'u7-s1-5';
+    final gps = FlutterTrackingGps(platform: platform);
+    final session = await gps.attachOrRecover();
+    expect(session, isNotNull);
+    expect(session!.sessionId, 'u7-s1-5');
+    expect(platform.calls, contains('restore:recover'));
+    expect(platform.calls.where((c) => c.startsWith('start')), isEmpty, reason: 'attach, never start again');
+    await session.dispose();
+  });
+
+  test('the new clock fields are part of the snapshot and of its equality', () {
+    const a = TrackingSnapshot.idle();
+    final b = TrackingSnapshot(
+      state: a.state, quality: a.quality, totalMeters: 0, gpsMeters: 0, gapBridgeMeters: 0, pdrMeters: 0,
+      pendingPdrMeters: 0, segmentId: 0, fixCount: 0, elapsedTime: const Duration(seconds: 1),
+    );
+    expect(a == b, isFalse);
+    expect(b.elapsedTime, const Duration(seconds: 1));
+    expect(b.collection, CollectionState.notCollecting);
+  });
+
+  test('attachOrRecover leaves a session the app does not accept untouched', () async {
+    final platform = FakePlatform()..open = 'u8-s1-5';
+    final gps = FlutterTrackingGps(platform: platform);
+    expect(await gps.attachOrRecover(accept: (id) => id.startsWith('u7-')), isNull);
+    expect(platform.calls, isNot(contains('restore:recover')));
+  });
+
+  test('attachOrRecover disposes the session when the restore fails', () async {
+    final platform = FakePlatform()
+      ..open = 'u7-s1-5'
+      ..restoreError = StateError('journal unusable');
+    final gps = FlutterTrackingGps(platform: platform);
+    await expectLater(gps.attachOrRecover(), throwsA(isA<StateError>()));
   });
 }

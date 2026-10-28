@@ -74,6 +74,20 @@ internal interface JournalStore {
     /** The ids of the sessions on this device, read from the journal headers. */
     @Throws(IOException::class)
     fun list(): List<String>
+
+    /**
+     * The open-session pointer: the id of the session that is recording or paused, so a process that died can find it
+     * again without Flutter. Written at start, removed when the session finishes or is cleared. Null when none.
+     */
+    @Throws(IOException::class)
+    fun activeId(): String?
+
+    @Throws(IOException::class)
+    fun markActive(sessionId: String)
+
+    /** Removes the pointer only when it still names [sessionId] (a newer session's pointer is never removed). */
+    @Throws(IOException::class)
+    fun clearActive(sessionId: String)
 }
 
 internal class FileJournalStore(private val directory: File) : JournalStore {
@@ -114,8 +128,37 @@ internal class FileJournalStore(private val directory: File) : JournalStore {
 
     @Synchronized
     @Throws(IOException::class)
+    override fun activeId(): String? {
+        val file = File(directory, ACTIVE_FILE)
+        return if (file.exists()) file.readText(Charsets.UTF_8).trim().ifEmpty { null } else null
+    }
+
+    @Synchronized
+    @Throws(IOException::class)
+    override fun markActive(sessionId: String) {
+        ensureDirectory()
+        val temp = File(directory, "$ACTIVE_FILE.tmp")
+        FileOutputStream(temp).use { out ->
+            out.write(sessionId.toByteArray(StandardCharsets.UTF_8))
+            out.fd.sync()
+        }
+        if (!temp.renameTo(File(directory, ACTIVE_FILE))) {
+            temp.delete()
+            throw IOException("cannot write the open-session pointer")
+        }
+    }
+
+    @Synchronized
+    @Throws(IOException::class)
+    override fun clearActive(sessionId: String) {
+        if (activeId() == sessionId) File(directory, ACTIVE_FILE).delete()
+    }
+
+    @Synchronized
+    @Throws(IOException::class)
     override fun clear(sessionId: String) {
         stopWriter(sessionId)
+        if (activeId() == sessionId) File(directory, ACTIVE_FILE).delete()
         val file = fileFor(sessionId)
         if (file.exists() && !file.delete()) throw IOException("cannot delete ${file.name}")
     }
@@ -172,6 +215,7 @@ internal class FileJournalStore(private val directory: File) : JournalStore {
 
     private companion object {
         const val EXTENSION = ".jnl"
+        const val ACTIVE_FILE = "active.session"
     }
 }
 

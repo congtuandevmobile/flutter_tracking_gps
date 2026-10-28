@@ -11,6 +11,20 @@ enum RecordingState {
 }
 
 /// Native health is independent from the last commanded recording state.
+/// Whether the platform is actually collecting location, separate from what the person asked for. A recovered
+/// session can have its clock back while collection is blocked (permission revoked, foreground service refused):
+/// never show such a recording as if it were measuring.
+enum CollectionState {
+  /// Location is being collected.
+  collecting,
+
+  /// The session is not recording (idle, paused, finished).
+  notCollecting,
+
+  /// The session should be recording but location cannot be collected.
+  blocked,
+}
+
 enum TrackingFailureState { none, permissionDenied, error }
 
 /// What a restore found in the session's journal.

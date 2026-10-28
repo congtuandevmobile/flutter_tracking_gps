@@ -1,3 +1,41 @@
+## v0.0.1-beta.2
+
+**Process-death recovery.** Not tested on a physical device. Tests: 197 core, 60 Android, 48 iOS, 92 Dart.
+
+* **A recording survives its process dying.** A session that was recording when the process died comes back
+  RECORDING: the calendar time that passed is credited to the session's clocks (`activeTime`, and the new
+  `elapsedTime`), the recording continues in a NEW segment, and **no distance is invented** for the dead interval
+  (the silence is reported in `uncreditedGap`). A paused session stays paused (only `elapsedTime` grows); a finished
+  one is untouched. A dead interval longer than `TrackingConfig.maxRecoverGap` is not credited: the session comes
+  back paused at its last event. A calendar clock that went backwards counts as zero and sets `clockAnomaly`.
+* **New snapshot fields:** `elapsedTime` (start to finish, pauses included), `recoveredGap`, `clockAnomaly`,
+  `collection` (`collecting` / `notCollecting` / `blocked`: a recovered session can have its clock back while
+  location cannot be collected; never present that as measuring).
+* **New API:** `FlutterTrackingGps.activeSessionId()` (the open-session pointer, per device) and
+  `attachOrRecover(accept:)`; `TrackingSession.restore(recoverRunning: true)`.
+* **Journal format 3:** ticks carry the calendar time; ONE self-contained `Q` record applies a recovery completely
+  (clock, unmeasured interval, closing the leg, the new segment), so a crash right after it loses nothing. The dead
+  interval is measured against a PAIR of clocks that describe the same instant (never the time a fix was received
+  against the time it was measured). A short interruption while GPS was healthy is reported as uncredited time too.
+  Older journals still restore.
+* **Recovery clocks:** only a fix the core accepted for its identity and clock can anchor a recovery (a measurement dated
+  in the future, another segment or session says nothing about the time); a restore reports the CORE's segment after a
+  replayed recovery; a refused `Q` record is validated before anything changes, so the valid prefix is untouched. On iOS
+  a recovery decided before a new start never replaces the new session, and a pause never answers with another
+  session's snapshot.
+* **A pause is acknowledged only once it is durable** (Android and iOS): a process killed right after `await pause()`
+  does not come back recording. The Android service does not continue or restart when it could not enter the
+  foreground, and a recovery never replaces a session the process already holds. iOS: `lastAcceptedFixAt` no longer
+  drifts by the recovery offset, a start fails if the open-session pointer cannot be written, and the opt-in modern
+  provider reports lost authorization (iOS 18) instead of looking like it collects.
+* **Android:** `TrackingService` is `START_STICKY`: when the system recreates it after killing the process, it
+  recovers the open session WITHOUT Flutter (`TrackingEngine.recoverActive`).
+* **iOS:** `FlutterTrackingGpsRuntime.bootstrapAtLaunch()` (call it from `application(_:didFinishLaunchingWithOptions:)`)
+  recovers the open session before Flutter exists. Opt-in, off by default and NOT verified on a device:
+  `FlutterTrackingGpsRuntime.useLiveUpdates` (iOS 17+ `CLLocationUpdate.liveUpdates` + `CLBackgroundActivitySession`,
+  `CLServiceSession` on iOS 18) and `wakeOnSignificantChange` (significant-change monitoring, needs "Always").
+  Whether iOS relaunches the app after the user force-quits it is not guaranteed.
+
 ## v0.0.1-beta.1
 
 Identity cleanup, no behaviour change. The Android/Kotlin package, the plugin `package:`

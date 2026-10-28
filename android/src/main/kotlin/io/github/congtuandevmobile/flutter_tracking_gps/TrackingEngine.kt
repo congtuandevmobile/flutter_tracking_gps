@@ -106,6 +106,13 @@ internal class TrackingEngine(
     private var request: Request? = null
     private var reconfiguring = false
 
+    /** Location updates failed (permission revoked, provider error): a recording that cannot collect says so. */
+    @Volatile private var collectorFailed = false
+
+    /** `BridgeSnapshot.state` code of a session that is recording (see `TrackingCoreBridge`). */
+    private val STATE_CODE_RUNNING = 1
+    private val DEFAULT_INTERVAL_MS = 1000L
+
     private data class Request(val intervalMs: Long, val minDistanceMeters: Float)
 
     /** What the app asked for at start (notification text, intervals...), restored with the session. */
@@ -121,6 +128,15 @@ internal class TrackingEngine(
             journalFailed = failure != null,
             restoreState = restoreState,
             engineChanged = engineChanged,
+            elapsedTimeMs = synchronized(coreLock) { recorder?.elapsedTimeMs(monotonicMs()) } ?: 0,
+            recoveredGapMs = synchronized(coreLock) { recorder?.recoveredGapMs } ?: 0,
+            clockAnomaly = synchronized(coreLock) { recorder?.clockAnomaly } ?: false,
+            collection = when {
+                // A failure moves the state to ERROR/PERMISSION_DENIED, but the person still asked to record.
+                collectorFailed && state != NativeTrackingState.STOPPED && state != NativeTrackingState.IDLE -> NativeCollection.BLOCKED
+                state != NativeTrackingState.RUNNING -> NativeCollection.NOT_COLLECTING
+                else -> NativeCollection.COLLECTING
+            },
             state = state,
             segmentId = segmentId,
             fixCount = fixCount,
@@ -142,11 +158,15 @@ internal class TrackingEngine(
             "title" to config.notificationTitle, "text" to config.notificationText,
             "intervalMs" to config.intervalMs.toString(), "minDistanceMeters" to config.minDistanceMeters.toString(),
             "stepsEnabled" to config.stepsEnabled.toString(),
+            // Kept in the journal so a recovery without Flutter (the service) knows the limit the app chose.
+            "maxRecoverGapMs" to config.maxRecoverGapMs.toString(),
         )
         val rec = SessionRecorder.start(
             newSink, settingsOf(config.engine, config.adaptiveSampling, config.batterySaver), config.sessionId,
             now, wallClockMs(), config.startSegmentId.toInt(), config.initialSteps, newExtras,
         )
+        // The open-session pointer: lets the process find this session again after it dies.
+        withContext(Dispatchers.IO) { store.markActive(config.sessionId) }
         synchronized(coreLock) {
             recorder = rec
             sink = newSink
@@ -179,6 +199,10 @@ internal class TrackingEngine(
                 coreStrict { it.pause(monotonicMs()) }
             }
             publish()
+            // The pause is acknowledged only once it is DURABLE: a process killed right after `await pause()` must not
+            // come back recording what the person had just paused.
+            val durable = withContext(Dispatchers.IO) { recorder?.flush() == true }
+            if (!durable) throw IOException("the pause could not be persisted")
         }
         snapshot()
     }
@@ -218,6 +242,7 @@ internal class TrackingEngine(
                 recorder?.flush()
                 // The session is over: free the writer thread and the file handle (a later open reopens it).
                 try {
+                    store.clearActive(id)
                     store.release(id)
                 } catch (e: IOException) {
                     Log.e(LOG_TAG, "cannot release the journal writer", e)
@@ -250,21 +275,52 @@ internal class TrackingEngine(
      * nothing is replayed.
      */
     @Throws(IOException::class)
-    suspend fun restore(config: StartConfig): NativeSnapshot = commands.withLock {
+    suspend fun restore(config: StartConfig): NativeSnapshot =
+        restoreSession(config.sessionId, config.intervalMs, config.minDistanceMeters, config.recoverRunning, config.maxRecoverGapMs)
+
+    /** The id of the session that was recording or paused when it was last seen (the open-session pointer), or null. */
+    @Throws(IOException::class)
+    suspend fun activeSessionId(): String? = withContext(Dispatchers.IO) { store.activeId() }
+
+    /**
+     * Process-death recovery WITHOUT Flutter: finds the open session and continues it. Returns null when there is
+     * none, the live snapshot when this process already holds it (nothing is replayed twice).
+     */
+    @Throws(IOException::class)
+    suspend fun recoverActive(maxGapMs: Long = -1L): NativeSnapshot? = commands.withLock {
+        // Reading the pointer and committing to it happen under the SAME lock as Start/Pause/Finish: a session the
+        // person started meanwhile is never replaced by a recovery that was decided earlier.
+        val id = withContext(Dispatchers.IO) { store.activeId() } ?: return@withLock null
+        if (state != NativeTrackingState.IDLE && state != NativeTrackingState.STOPPED && id != sessionId) {
+            return@withLock snapshot() // this process holds another session: it wins
+        }
+        restoreLocked(id, DEFAULT_INTERVAL_MS, 0.0, recoverRunning = true, maxRecoverGapMs = maxGapMs)
+    }
+
+    private suspend fun restoreSession(
+        id: String, defaultIntervalMs: Long, defaultMinDistanceMeters: Double, recoverRunning: Boolean, maxRecoverGapMs: Long,
+    ): NativeSnapshot = commands.withLock {
+        restoreLocked(id, defaultIntervalMs, defaultMinDistanceMeters, recoverRunning, maxRecoverGapMs)
+    }
+
+    /** The body of a restore. The caller holds [commands]: choosing the session and committing to it are ONE step. */
+    private suspend fun restoreLocked(
+        id: String, defaultIntervalMs: Long, defaultMinDistanceMeters: Double, recoverRunning: Boolean, maxRecoverGapMs: Long,
+    ): NativeSnapshot {
         val running = state == NativeTrackingState.RUNNING || state == NativeTrackingState.PAUSED
-        if (config.sessionId == sessionId && running) return@withLock snapshot()
+        if (id == sessionId && running) return snapshot()
         haltJobs()
-        val lines = withContext(Dispatchers.IO) { store.read(config.sessionId) }
+        val lines = withContext(Dispatchers.IO) { store.read(id) }
         // The core decides what is trustworthy: intact (CRC) AND applicable. Nothing is appended before the repair.
         val plan = SessionRecorder.plan(lines)
         if (!plan.usable) throw IOException("no usable journal for this session (${plan.status})")
         if (plan.needsRewrite) {
             // Damage in the middle (or an old-format header) changes what the file holds: keep the original beside it.
-            withContext(Dispatchers.IO) { store.rewrite(config.sessionId, plan.lines, plan.keepBackup) }
+            withContext(Dispatchers.IO) { store.rewrite(id, plan.lines, plan.keepBackup) }
         }
         val usable = plan.lines
-        val newSink = store.open(config.sessionId)
-        val result = SessionRecorder.restore(newSink, usable)
+        val newSink = store.open(id)
+        val result = SessionRecorder.restore(newSink, usable, !recoverRunning)
         val rec = result.recorder ?: throw IOException("journal replay failed (${result.status})")
         synchronized(coreLock) {
             recorder = rec
@@ -278,8 +334,8 @@ internal class TrackingEngine(
             adaptive = settingsAdaptive(usable)
             stepsEnabled = result.extras["stepsEnabled"] == "true"
             stepsStatus = NativeStepsStatus.OFF
-            val interval = result.extras["intervalMs"]?.toLongOrNull() ?: config.intervalMs
-            val minDistance = result.extras["minDistanceMeters"]?.toFloatOrNull() ?: config.minDistanceMeters.toFloat()
+            val interval = result.extras["intervalMs"]?.toLongOrNull() ?: defaultIntervalMs
+            val minDistance = result.extras["minDistanceMeters"]?.toFloatOrNull() ?: defaultMinDistanceMeters.toFloat()
             request = Request(interval, minDistance)
             lastError = if (result.engineChanged) {
                 "${TrackingErrorCode.ENGINE_CHANGED}: the journal was recorded with engine ${result.engineVersion}; " +
@@ -303,10 +359,22 @@ internal class TrackingEngine(
             } else {
                 restoredStepsFinal = null
                 state = NativeTrackingState.PAUSED
+                if (recoverRunning) {
+                    // The process died: credit the calendar time that passed and continue in a NEW segment.
+                    // A negative limit means "the one the app chose at start", read from the journal.
+                    val limit = if (maxRecoverGapMs >= 0) maxRecoverGapMs else result.extras["maxRecoverGapMs"]?.toLongOrNull() ?: 0L
+                    val recovery = rec.recoverAfterProcessDeath(monotonicMs(), wallClockMs(), limit)
+                    segmentId = recovery.segmentId.toLong()
+                    if (rec.snapshot().state == STATE_CODE_RUNNING) state = NativeTrackingState.RUNNING
+                }
             }
         }
+        if (state == NativeTrackingState.RUNNING) {
+            beginCollecting()
+            beginSteps()
+        }
         publish()
-        snapshot()
+        return snapshot()
     }
 
     /** Reads the persisted fixes (after the writer reached the disk); blocking I/O runs on `Dispatchers.IO`. */
@@ -368,6 +436,7 @@ internal class TrackingEngine(
 
     private fun beginCollecting() {
         val req = request ?: return
+        collectorFailed = false
         val gen = generation
         collector = scope.launch {
             source.locations(req.intervalMs, req.minDistanceMeters)
@@ -379,7 +448,7 @@ internal class TrackingEngine(
                 delay(TICK_MS)
                 synchronized(coreLock) {
                     if (gen != generation || state != NativeTrackingState.RUNNING) return@synchronized
-                    guardedCore { it.onTick(monotonicMs()) }
+                    guardedCore { it.onTick(monotonicMs(), wallClockMs()) }
                 }
                 publish()
             }
@@ -475,6 +544,7 @@ internal class TrackingEngine(
         Log.e(LOG_TAG, "location updates failed", error)
         synchronized(coreLock) {
             if (gen != generation) return
+            collectorFailed = true
             lastError = "${TrackingErrorCode.LOCATION_UPDATES_FAILED}: ${error.message ?: error::class.java.simpleName}"
             state = if (error is SecurityException) NativeTrackingState.PERMISSION_DENIED else NativeTrackingState.ERROR
         }

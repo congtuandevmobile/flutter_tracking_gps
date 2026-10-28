@@ -301,3 +301,17 @@ when there is no anchor to confirm it. `PdrPolicy.off` ignores it entirely.
 - A step batch delivered long after its interval cannot be attached to a gap that
   was already credited (it is lost, not double counted).
 - A watch producer is designed for (same events, same core) but not built here.
+
+## After the process dies
+
+| Before | Comes back | Elapsed | Active (workout) clock | Distance |
+|---|---|---|---|---|
+| Recording | Recording, new segment | grows by the dead interval | grows by the dead interval | unchanged; the silence is `uncreditedGap` |
+| Paused | Paused | grows by the dead interval | unchanged | unchanged |
+| Finished | Finished (read only) | frozen | frozen | frozen |
+| Recording, dead interval above `maxRecoverGap` | Paused at the last event | as a plain restore | as a plain restore | unchanged |
+
+Who brings it back: Android, the sticky `TrackingService` (no Flutter needed); iOS, `FlutterTrackingGpsRuntime.bootstrapAtLaunch()`
+when the system starts the app again, otherwise the app when the person opens it (`attachOrRecover`). iOS does not
+promise a relaunch after the user force-quits the app; the clocks are recovered whenever the app runs again. A recovered
+session whose location cannot be collected reports `collection: blocked`.

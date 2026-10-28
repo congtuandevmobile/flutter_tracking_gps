@@ -99,6 +99,10 @@ class PlatformSnapshot {
     this.journalFailed = false,
     this.restoreState = RestoreState.notRestored,
     this.engineChanged = false,
+    this.elapsedTime = Duration.zero,
+    this.recoveredGap = Duration.zero,
+    this.clockAnomaly = false,
+    this.collection = CollectionState.notCollecting,
     this.sessionId,
     this.error,
   });
@@ -118,6 +122,14 @@ class PlatformSnapshot {
   final bool journalFailed;
   final RestoreState restoreState;
   final bool engineChanged;
+
+  /// Start to finish, pauses included.
+  final Duration elapsedTime;
+
+  /// Calendar time credited after a process death (summed).
+  final Duration recoveredGap;
+  final bool clockAnomaly;
+  final CollectionState collection;
   final String? error;
 }
 
@@ -164,7 +176,13 @@ abstract interface class TrackingPlatform {
     required bool batterySaver,
     required bool stepsEnabled,
     required int initialSteps,
+    bool recoverRunning = false,
+    String notificationTitle = '',
+    String notificationText = '',
   });
+
+  /// The id of the session that was recording or paused when it was last seen (the open-session pointer), or null.
+  Future<String?> activeSessionId();
 
   Future<PlatformSnapshot> pause(String sessionId);
   Future<PlatformSnapshot> resume(String sessionId);

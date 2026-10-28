@@ -289,6 +289,21 @@ enum class NativeGpsQuality(val raw: Int) {
   }
 }
 
+enum class NativeCollection(val raw: Int) {
+  /** Location is being collected. */
+  COLLECTING(0),
+  /** The session is not recording (idle, paused, finished). */
+  NOT_COLLECTING(1),
+  /** The session should be recording but location cannot be collected (permission, service refused). */
+  BLOCKED(2);
+
+  companion object {
+    fun ofRaw(raw: Int): NativeCollection? {
+      return values().firstOrNull { it.raw == raw }
+    }
+  }
+}
+
 /**
  * One raw location reading, exactly as the platform produced it. No filter,
  * no smoothing, no odometer: the Dart engine decides what counts as distance.
@@ -528,6 +543,16 @@ data class EngineConfig (
 /** Generated class from Pigeon that represents data sent in messages. */
 data class StartConfig (
   /**
+   * Restore only: continue a session that was RECORDING when its process died, crediting the calendar time that
+   * passed (see `SessionRecorder.recoverAfterProcessDeath`). False restores it paused at its last event.
+   */
+  val recoverRunning: Boolean,
+  /**
+   * Restore with [recoverRunning]: a dead interval longer than this is NOT credited and the session is parked
+   * paused instead. 0 = no limit.
+   */
+  val maxRecoverGapMs: Long,
+  /**
    * Count steps natively (Android `TYPE_STEP_COUNTER`, iOS `CMPedometer`) and
    * let the engine turn them into a pending estimate while GPS is weak. Without
    * the motion permission the recording goes on and `NativeSnapshot.stepsStatus`
@@ -574,23 +599,27 @@ data class StartConfig (
  {
   companion object {
     fun fromList(pigeonVar_list: List<Any?>): StartConfig {
-      val stepsEnabled = pigeonVar_list[0] as Boolean
-      val initialSteps = pigeonVar_list[1] as Long
-      val engine = pigeonVar_list[2] as EngineConfig
-      val adaptiveSampling = pigeonVar_list[3] as Boolean
-      val batterySaver = pigeonVar_list[4] as Boolean
-      val sessionId = pigeonVar_list[5] as String
-      val startSeq = pigeonVar_list[6] as Long
-      val startSegmentId = pigeonVar_list[7] as Long
-      val intervalMs = pigeonVar_list[8] as Long
-      val minDistanceMeters = pigeonVar_list[9] as Double
-      val notificationTitle = pigeonVar_list[10] as String
-      val notificationText = pigeonVar_list[11] as String
-      return StartConfig(stepsEnabled, initialSteps, engine, adaptiveSampling, batterySaver, sessionId, startSeq, startSegmentId, intervalMs, minDistanceMeters, notificationTitle, notificationText)
+      val recoverRunning = pigeonVar_list[0] as Boolean
+      val maxRecoverGapMs = pigeonVar_list[1] as Long
+      val stepsEnabled = pigeonVar_list[2] as Boolean
+      val initialSteps = pigeonVar_list[3] as Long
+      val engine = pigeonVar_list[4] as EngineConfig
+      val adaptiveSampling = pigeonVar_list[5] as Boolean
+      val batterySaver = pigeonVar_list[6] as Boolean
+      val sessionId = pigeonVar_list[7] as String
+      val startSeq = pigeonVar_list[8] as Long
+      val startSegmentId = pigeonVar_list[9] as Long
+      val intervalMs = pigeonVar_list[10] as Long
+      val minDistanceMeters = pigeonVar_list[11] as Double
+      val notificationTitle = pigeonVar_list[12] as String
+      val notificationText = pigeonVar_list[13] as String
+      return StartConfig(recoverRunning, maxRecoverGapMs, stepsEnabled, initialSteps, engine, adaptiveSampling, batterySaver, sessionId, startSeq, startSegmentId, intervalMs, minDistanceMeters, notificationTitle, notificationText)
     }
   }
   fun toList(): List<Any?> {
     return listOf(
+      recoverRunning,
+      maxRecoverGapMs,
       stepsEnabled,
       initialSteps,
       engine,
@@ -613,11 +642,13 @@ data class StartConfig (
       return true
     }
     val other = other as StartConfig
-    return TrackingApiPigeonUtils.deepEquals(this.stepsEnabled, other.stepsEnabled) && TrackingApiPigeonUtils.deepEquals(this.initialSteps, other.initialSteps) && TrackingApiPigeonUtils.deepEquals(this.engine, other.engine) && TrackingApiPigeonUtils.deepEquals(this.adaptiveSampling, other.adaptiveSampling) && TrackingApiPigeonUtils.deepEquals(this.batterySaver, other.batterySaver) && TrackingApiPigeonUtils.deepEquals(this.sessionId, other.sessionId) && TrackingApiPigeonUtils.deepEquals(this.startSeq, other.startSeq) && TrackingApiPigeonUtils.deepEquals(this.startSegmentId, other.startSegmentId) && TrackingApiPigeonUtils.deepEquals(this.intervalMs, other.intervalMs) && TrackingApiPigeonUtils.deepEquals(this.minDistanceMeters, other.minDistanceMeters) && TrackingApiPigeonUtils.deepEquals(this.notificationTitle, other.notificationTitle) && TrackingApiPigeonUtils.deepEquals(this.notificationText, other.notificationText)
+    return TrackingApiPigeonUtils.deepEquals(this.recoverRunning, other.recoverRunning) && TrackingApiPigeonUtils.deepEquals(this.maxRecoverGapMs, other.maxRecoverGapMs) && TrackingApiPigeonUtils.deepEquals(this.stepsEnabled, other.stepsEnabled) && TrackingApiPigeonUtils.deepEquals(this.initialSteps, other.initialSteps) && TrackingApiPigeonUtils.deepEquals(this.engine, other.engine) && TrackingApiPigeonUtils.deepEquals(this.adaptiveSampling, other.adaptiveSampling) && TrackingApiPigeonUtils.deepEquals(this.batterySaver, other.batterySaver) && TrackingApiPigeonUtils.deepEquals(this.sessionId, other.sessionId) && TrackingApiPigeonUtils.deepEquals(this.startSeq, other.startSeq) && TrackingApiPigeonUtils.deepEquals(this.startSegmentId, other.startSegmentId) && TrackingApiPigeonUtils.deepEquals(this.intervalMs, other.intervalMs) && TrackingApiPigeonUtils.deepEquals(this.minDistanceMeters, other.minDistanceMeters) && TrackingApiPigeonUtils.deepEquals(this.notificationTitle, other.notificationTitle) && TrackingApiPigeonUtils.deepEquals(this.notificationText, other.notificationText)
   }
 
   override fun hashCode(): Int {
     var result = javaClass.hashCode()
+    result = 31 * result + TrackingApiPigeonUtils.deepHash(this.recoverRunning)
+    result = 31 * result + TrackingApiPigeonUtils.deepHash(this.maxRecoverGapMs)
     result = 31 * result + TrackingApiPigeonUtils.deepHash(this.stepsEnabled)
     result = 31 * result + TrackingApiPigeonUtils.deepHash(this.initialSteps)
     result = 31 * result + TrackingApiPigeonUtils.deepHash(this.engine)
@@ -787,6 +818,17 @@ data class NativeSnapshot (
    * [journalPending] says, and the recording must be treated as not durable.
    */
   val journalFailed: Boolean,
+  /** Start to finish, PAUSES INCLUDED (it keeps running until the session finishes). */
+  val elapsedTimeMs: Long,
+  /** Calendar time that passed while the process was dead, credited by a recovery (summed). 0 when none. */
+  val recoveredGapMs: Long,
+  /** The calendar clock went backwards across a recovery: that gap could not be measured and counted as 0. */
+  val clockAnomaly: Boolean,
+  /**
+   * Whether native is actually collecting location now, separate from what the person asked for: a recovered
+   * session can have its clock back while collection is blocked (permission, foreground service refused).
+   */
+  val collection: NativeCollection,
   /**
    * True when the step total is final: after `stop`, the platform's exact count
    * for the closed segment was obtained (or there is no step sensor). False
@@ -812,16 +854,20 @@ data class NativeSnapshot (
       val engineChanged = pigeonVar_list[2] as Boolean
       val journalPending = pigeonVar_list[3] as Long
       val journalFailed = pigeonVar_list[4] as Boolean
-      val stepsFinal = pigeonVar_list[5] as Boolean
-      val sessionId = pigeonVar_list[6] as String?
-      val state = pigeonVar_list[7] as NativeTrackingState
-      val segmentId = pigeonVar_list[8] as Long
-      val distance = pigeonVar_list[9] as NativeDistance
-      val fixCount = pigeonVar_list[10] as Long
-      val lastFixTimeMs = pigeonVar_list[11] as Long?
-      val updatedAtMs = pigeonVar_list[12] as Long
-      val error = pigeonVar_list[13] as String?
-      return NativeSnapshot(stepsStatus, restoreState, engineChanged, journalPending, journalFailed, stepsFinal, sessionId, state, segmentId, distance, fixCount, lastFixTimeMs, updatedAtMs, error)
+      val elapsedTimeMs = pigeonVar_list[5] as Long
+      val recoveredGapMs = pigeonVar_list[6] as Long
+      val clockAnomaly = pigeonVar_list[7] as Boolean
+      val collection = pigeonVar_list[8] as NativeCollection
+      val stepsFinal = pigeonVar_list[9] as Boolean
+      val sessionId = pigeonVar_list[10] as String?
+      val state = pigeonVar_list[11] as NativeTrackingState
+      val segmentId = pigeonVar_list[12] as Long
+      val distance = pigeonVar_list[13] as NativeDistance
+      val fixCount = pigeonVar_list[14] as Long
+      val lastFixTimeMs = pigeonVar_list[15] as Long?
+      val updatedAtMs = pigeonVar_list[16] as Long
+      val error = pigeonVar_list[17] as String?
+      return NativeSnapshot(stepsStatus, restoreState, engineChanged, journalPending, journalFailed, elapsedTimeMs, recoveredGapMs, clockAnomaly, collection, stepsFinal, sessionId, state, segmentId, distance, fixCount, lastFixTimeMs, updatedAtMs, error)
     }
   }
   fun toList(): List<Any?> {
@@ -831,6 +877,10 @@ data class NativeSnapshot (
       engineChanged,
       journalPending,
       journalFailed,
+      elapsedTimeMs,
+      recoveredGapMs,
+      clockAnomaly,
+      collection,
       stepsFinal,
       sessionId,
       state,
@@ -850,7 +900,7 @@ data class NativeSnapshot (
       return true
     }
     val other = other as NativeSnapshot
-    return TrackingApiPigeonUtils.deepEquals(this.stepsStatus, other.stepsStatus) && TrackingApiPigeonUtils.deepEquals(this.restoreState, other.restoreState) && TrackingApiPigeonUtils.deepEquals(this.engineChanged, other.engineChanged) && TrackingApiPigeonUtils.deepEquals(this.journalPending, other.journalPending) && TrackingApiPigeonUtils.deepEquals(this.journalFailed, other.journalFailed) && TrackingApiPigeonUtils.deepEquals(this.stepsFinal, other.stepsFinal) && TrackingApiPigeonUtils.deepEquals(this.sessionId, other.sessionId) && TrackingApiPigeonUtils.deepEquals(this.state, other.state) && TrackingApiPigeonUtils.deepEquals(this.segmentId, other.segmentId) && TrackingApiPigeonUtils.deepEquals(this.distance, other.distance) && TrackingApiPigeonUtils.deepEquals(this.fixCount, other.fixCount) && TrackingApiPigeonUtils.deepEquals(this.lastFixTimeMs, other.lastFixTimeMs) && TrackingApiPigeonUtils.deepEquals(this.updatedAtMs, other.updatedAtMs) && TrackingApiPigeonUtils.deepEquals(this.error, other.error)
+    return TrackingApiPigeonUtils.deepEquals(this.stepsStatus, other.stepsStatus) && TrackingApiPigeonUtils.deepEquals(this.restoreState, other.restoreState) && TrackingApiPigeonUtils.deepEquals(this.engineChanged, other.engineChanged) && TrackingApiPigeonUtils.deepEquals(this.journalPending, other.journalPending) && TrackingApiPigeonUtils.deepEquals(this.journalFailed, other.journalFailed) && TrackingApiPigeonUtils.deepEquals(this.elapsedTimeMs, other.elapsedTimeMs) && TrackingApiPigeonUtils.deepEquals(this.recoveredGapMs, other.recoveredGapMs) && TrackingApiPigeonUtils.deepEquals(this.clockAnomaly, other.clockAnomaly) && TrackingApiPigeonUtils.deepEquals(this.collection, other.collection) && TrackingApiPigeonUtils.deepEquals(this.stepsFinal, other.stepsFinal) && TrackingApiPigeonUtils.deepEquals(this.sessionId, other.sessionId) && TrackingApiPigeonUtils.deepEquals(this.state, other.state) && TrackingApiPigeonUtils.deepEquals(this.segmentId, other.segmentId) && TrackingApiPigeonUtils.deepEquals(this.distance, other.distance) && TrackingApiPigeonUtils.deepEquals(this.fixCount, other.fixCount) && TrackingApiPigeonUtils.deepEquals(this.lastFixTimeMs, other.lastFixTimeMs) && TrackingApiPigeonUtils.deepEquals(this.updatedAtMs, other.updatedAtMs) && TrackingApiPigeonUtils.deepEquals(this.error, other.error)
   }
 
   override fun hashCode(): Int {
@@ -860,6 +910,10 @@ data class NativeSnapshot (
     result = 31 * result + TrackingApiPigeonUtils.deepHash(this.engineChanged)
     result = 31 * result + TrackingApiPigeonUtils.deepHash(this.journalPending)
     result = 31 * result + TrackingApiPigeonUtils.deepHash(this.journalFailed)
+    result = 31 * result + TrackingApiPigeonUtils.deepHash(this.elapsedTimeMs)
+    result = 31 * result + TrackingApiPigeonUtils.deepHash(this.recoveredGapMs)
+    result = 31 * result + TrackingApiPigeonUtils.deepHash(this.clockAnomaly)
+    result = 31 * result + TrackingApiPigeonUtils.deepHash(this.collection)
     result = 31 * result + TrackingApiPigeonUtils.deepHash(this.stepsFinal)
     result = 31 * result + TrackingApiPigeonUtils.deepHash(this.sessionId)
     result = 31 * result + TrackingApiPigeonUtils.deepHash(this.state)
@@ -901,26 +955,31 @@ private open class TrackingApiPigeonCodec : StandardMessageCodec() {
         }
       }
       134.toByte() -> {
-        return (readValue(buffer) as? List<Any?>)?.let {
-          NativeFix.fromList(it)
+        return (readValue(buffer) as Long?)?.let {
+          NativeCollection.ofRaw(it.toInt())
         }
       }
       135.toByte() -> {
         return (readValue(buffer) as? List<Any?>)?.let {
-          EngineConfig.fromList(it)
+          NativeFix.fromList(it)
         }
       }
       136.toByte() -> {
         return (readValue(buffer) as? List<Any?>)?.let {
-          StartConfig.fromList(it)
+          EngineConfig.fromList(it)
         }
       }
       137.toByte() -> {
         return (readValue(buffer) as? List<Any?>)?.let {
-          NativeDistance.fromList(it)
+          StartConfig.fromList(it)
         }
       }
       138.toByte() -> {
+        return (readValue(buffer) as? List<Any?>)?.let {
+          NativeDistance.fromList(it)
+        }
+      }
+      139.toByte() -> {
         return (readValue(buffer) as? List<Any?>)?.let {
           NativeSnapshot.fromList(it)
         }
@@ -950,24 +1009,28 @@ private open class TrackingApiPigeonCodec : StandardMessageCodec() {
         stream.write(133)
         writeValue(stream, value.raw.toLong())
       }
-      is NativeFix -> {
+      is NativeCollection -> {
         stream.write(134)
-        writeValue(stream, value.toList())
+        writeValue(stream, value.raw.toLong())
       }
-      is EngineConfig -> {
+      is NativeFix -> {
         stream.write(135)
         writeValue(stream, value.toList())
       }
-      is StartConfig -> {
+      is EngineConfig -> {
         stream.write(136)
         writeValue(stream, value.toList())
       }
-      is NativeDistance -> {
+      is StartConfig -> {
         stream.write(137)
         writeValue(stream, value.toList())
       }
-      is NativeSnapshot -> {
+      is NativeDistance -> {
         stream.write(138)
+        writeValue(stream, value.toList())
+      }
+      is NativeSnapshot -> {
+        stream.write(139)
         writeValue(stream, value.toList())
       }
       else -> super.writeValue(stream, value)
@@ -1019,6 +1082,11 @@ interface TrackingHostApi {
    * PAUSED: [resume] continues it in a new segment.
    */
   fun restoreSession(config: StartConfig, callback: (Result<NativeSnapshot>) -> Unit)
+  /**
+   * The id of the session that was recording or paused when it was last seen (the open-session pointer), or null.
+   * Written when a session starts, removed when it finishes or is cleared.
+   */
+  fun activeSessionId(callback: (Result<String?>) -> Unit)
   /** Coordinate-free timeline of what the native engine decided. */
   fun getReport(): String
   /**
@@ -1239,6 +1307,24 @@ interface TrackingHostApi {
             val args = message as List<Any?>
             val configArg = args[0] as StartConfig
             api.restoreSession(configArg) { result: Result<NativeSnapshot> ->
+              val error = result.exceptionOrNull()
+              if (error != null) {
+                reply.reply(TrackingApiPigeonUtils.wrapError(error))
+              } else {
+                val data = result.getOrNull()
+                reply.reply(TrackingApiPigeonUtils.wrapResult(data))
+              }
+            }
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.flutter_tracking_gps.TrackingHostApi.activeSessionId$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { _, reply ->
+            api.activeSessionId{ result: Result<String?> ->
               val error = result.exceptionOrNull()
               if (error != null) {
                 reply.reply(TrackingApiPigeonUtils.wrapError(error))

@@ -35,6 +35,12 @@ protocol JournalStoring: AnyObject {
     func release(_ sessionId: String)
     /// The ids of the sessions on this device, read from the journal headers.
     func list() throws -> [String]
+    /// The open-session pointer: the id of the session that is recording or paused, so a process that died can find
+    /// it again without Flutter. Written at start, removed when the session finishes or is cleared. Nil when none.
+    func activeId() -> String?
+    func markActive(_ sessionId: String) throws
+    /// Removes the pointer only when it still names `sessionId` (a newer session's pointer is never removed).
+    func clearActive(_ sessionId: String)
 }
 
 final class FileJournalStore: JournalStoring {
@@ -113,7 +119,41 @@ final class FileJournalStore: JournalStoring {
         Darwin.close(fd)
     }
 
+    func activeId() -> String? {
+        guard let text = try? String(contentsOf: activeURL, encoding: .utf8) else { return nil }
+        let id = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return id.isEmpty ? nil : id
+    }
+
+    func markActive(_ sessionId: String) throws {
+        try ensureDirectory()
+        let temp = directory.appendingPathComponent("active.session.tmp")
+        if FileManager.default.fileExists(atPath: temp.path) { try FileManager.default.removeItem(at: temp) }
+        FileManager.default.createFile(atPath: temp.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: temp)
+        do {
+            try handle.write(contentsOf: Data(sessionId.utf8))
+            try handle.synchronize()
+            try handle.close()
+        } catch {
+            try? handle.close()
+            throw error
+        }
+        if FileManager.default.fileExists(atPath: activeURL.path) {
+            _ = try FileManager.default.replaceItemAt(activeURL, withItemAt: temp)
+        } else {
+            try FileManager.default.moveItem(at: temp, to: activeURL)
+        }
+    }
+
+    func clearActive(_ sessionId: String) {
+        if activeId() == sessionId { try? FileManager.default.removeItem(at: activeURL) }
+    }
+
+    private var activeURL: URL { directory.appendingPathComponent("active.session") }
+
     func clear(_ sessionId: String) throws {
+        clearActive(sessionId)
         lock.lock()
         let writer = writers.removeValue(forKey: sessionId)
         lock.unlock()

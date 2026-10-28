@@ -80,8 +80,29 @@ sealed class JournalRecord {
         val nowMs: Long,
     ) : JournalRecord()
 
-    /** Written only when a tick changed the state (GPS silence): ticks are otherwise not inputs. */
-    data class Tick(val atMs: Long) : JournalRecord()
+    /**
+     * A 1 Hz tick. [wallMs] is the CALENDAR time at the tick (-1 when the host did not give one): it is the
+     * reference a process-death recovery measures the dead interval against.
+     */
+    data class Tick(val atMs: Long, val wallMs: Long = -1) : JournalRecord()
+
+    /**
+     * The process died and came back. ONE record that applies a recovery completely, so a crash after it is written
+     * loses nothing: the engine's clock moves to [targetMs] (calendar time [gapMs] elapsed while nothing ran), every
+     * later live input is shifted by [offsetMs], and when the session was recording its leg is closed there and a new
+     * segment opens. Replay applies exactly the same steps. [anomaly]: the calendar clock went BACKWARDS.
+     */
+    data class Recovered(
+        /** The engine time the clock moves to. */
+        val targetMs: Long,
+        val offsetMs: Long,
+        val gapMs: Long,
+        /** The session was RECORDING: the leg is closed at [targetMs] and a new one opens in [nextSegmentId]. */
+        val wasRunning: Boolean,
+        val nextSegmentId: Int,
+        val anomaly: Boolean,
+        val wallMs: Long,
+    ) : JournalRecord()
 
     data class StepCounter(val segmentId: Int, val measuredAtMs: Long, val deliveredAtMs: Long, val raw: Long) : JournalRecord()
     data class SegmentSteps(val segmentId: Int, val measuredAtMs: Long, val deliveredAtMs: Long, val count: Long) : JournalRecord()

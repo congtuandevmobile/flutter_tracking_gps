@@ -134,7 +134,10 @@ private final class MemoryStore: JournalStoring {
         sinks[sessionId] = s
         return s
     }
-    func read(_ sessionId: String) throws -> [String] { files[sessionId] ?? [] }
+    func read(_ sessionId: String) throws -> [String] {
+        onRead?(sessionId)
+        return files[sessionId] ?? []
+    }
     func rewrite(_ sessionId: String, lines: [String], keepBackup: Bool) throws {
         rewrites += 1
         if keepBackup { backups += 1 }
@@ -142,6 +145,16 @@ private final class MemoryStore: JournalStoring {
     }
     func clear(_ sessionId: String) throws { files[sessionId] = nil; sinks[sessionId] = nil }
     func release(_ sessionId: String) {}
+    var active: String?
+    var failMarkActive = false
+    /// Runs on the store queue when a journal is read (a hook to interleave another command).
+    var onRead: ((String) -> Void)?
+    func activeId() -> String? { active }
+    func markActive(_ sessionId: String) throws {
+        if failMarkActive { throw NSError(domain: "pointer", code: 1) }
+        active = sessionId
+    }
+    func clearActive(_ sessionId: String) { if active == sessionId { active = nil } }
     func list() throws -> [String] {
         files.values.compactMap { ($0.first.flatMap { JournalCodec.shared.decode(line: $0) } as? JournalRecord.Header)?.sessionId }
     }
@@ -168,9 +181,11 @@ final class RunnerTests: XCTestCase {
     }
 
     private func config(
-        _ id: String = "s", adaptive: Bool = false, steps: Bool = false, stride: Double = -1, maxSpeed: Double = 10
+        _ id: String = "s", adaptive: Bool = false, steps: Bool = false, stride: Double = -1, maxSpeed: Double = 10,
+        recover: Bool = false, maxGapMs: Int64 = 0
     ) -> StartConfig {
         StartConfig(
+            recoverRunning: recover, maxRecoverGapMs: maxGapMs,
             stepsEnabled: steps, initialSteps: 0,
             engine: engineConfig(stride: stride, maxSpeed: maxSpeed),
             adaptiveSampling: adaptive, batterySaver: false,
@@ -853,5 +868,138 @@ final class RunnerTests: XCTestCase {
         let migrated = try XCTUnwrap(JournalCodec.shared.decode(line: (store.files["s"] ?? [])[0]) as? JournalRecord.Header)
         XCTAssertEqual(migrated.version, JournalCodec.shared.VERSION)
         XCTAssertEqual(store.backups, 1)
+    }
+
+    // MARK: - Process-death recovery (the clock, the open-session pointer, collecting again)
+
+    func testTheOpenSessionPointerFollowsTheSession() throws {
+        let store = MemoryStore()
+        let engine = makeEngine(FakeProvider(clock: clock), store)
+        let none: NativeSnapshot? = try run { engine.recoverActive(completion: $0) }
+        XCTAssertNil(none)
+        let _: NativeSnapshot = try run { engine.start(config: config(), completion: $0) }
+        XCTAssertEqual(store.active, "s")
+        let _: NativeSnapshot = try run { engine.stop(sessionId: "s", completion: $0) }
+        XCTAssertNil(store.active, "a finished session is not open any more")
+    }
+
+    func testARecoveredSessionContinuesRecordingAndCreditsTheDeadInterval() throws {
+        let store = MemoryStore()
+        let provider = FakeProvider(clock: clock)
+        let dying = makeEngine(provider, store)
+        let _: NativeSnapshot = try run { dying.start(config: config(), completion: $0) }
+        runFixes(provider, seconds: 10)
+        drain(dying)
+        let before = dying.snapshot().distance.totalMeters
+
+        // The process dies; 30 s later a NEW process finds the open session and continues it.
+        clock.seconds += 30
+        let reborn = FakeProvider(clock: clock)
+        let engine = makeEngine(reborn, store)
+        let recovered: NativeSnapshot? = try run { engine.recoverActive(completion: $0) }
+        let snapshot = try XCTUnwrap(recovered)
+        XCTAssertEqual(snapshot.state, .running)
+        XCTAssertEqual(snapshot.segmentId, 1, "a new segment: nothing is bridged across the dead interval")
+        XCTAssertGreaterThanOrEqual(snapshot.recoveredGapMs, 29_000)
+        XCTAssertEqual(snapshot.collection, .collecting)
+        XCTAssertEqual(reborn.starts, 1, "location collection was started again")
+        XCTAssertEqual(snapshot.distance.totalMeters, before, accuracy: 1e-6, "no distance is invented")
+        XCTAssertGreaterThanOrEqual(snapshot.distance.activeTimeMs, 39_000)
+        XCTAssertGreaterThanOrEqual(snapshot.elapsedTimeMs, 39_000)
+    }
+
+    func testAPausedSessionStaysPausedButItsElapsedTimeKeepsGrowing() throws {
+        let store = MemoryStore()
+        let provider = FakeProvider(clock: clock)
+        let dying = makeEngine(provider, store)
+        let _: NativeSnapshot = try run { dying.start(config: config(), completion: $0) }
+        runFixes(provider, seconds: 10)
+        let _: NativeSnapshot = try run { dying.pause(sessionId: "s", completion: $0) }
+        clock.seconds += 60
+        let engine = makeEngine(FakeProvider(clock: clock), store)
+        let recovered: NativeSnapshot? = try run { engine.recoverActive(completion: $0) }
+        let snapshot = try XCTUnwrap(recovered)
+        XCTAssertEqual(snapshot.state, .paused)
+        XCTAssertEqual(snapshot.collection, .notCollecting)
+        XCTAssertGreaterThanOrEqual(snapshot.elapsedTimeMs, 69_000)
+        XCTAssertLessThanOrEqual(snapshot.distance.activeTimeMs, 11_000, "pauses are not workout time")
+    }
+
+    func testARecordingThatCannotStartLocationSaysSoInsteadOfLookingNormal() throws {
+        let store = MemoryStore()
+        let provider = FakeProvider(clock: clock)
+        let dying = makeEngine(provider, store)
+        let _: NativeSnapshot = try run { dying.start(config: config(), completion: $0) }
+        clock.seconds += 5
+        let blocked = FakeProvider(clock: clock)
+        blocked.startError = TrackingNativeError.missingBackgroundMode
+        let engine = makeEngine(blocked, store)
+        let recovered: NativeSnapshot? = try run { engine.recoverActive(completion: $0) }
+        XCTAssertEqual(try XCTUnwrap(recovered).collection, .blocked)
+    }
+
+    func testAPauseIsNotAcknowledgedUntilItIsDurable() throws {
+        let store = MemoryStore()
+        let engine = makeEngine(FakeProvider(clock: clock), store)
+        let _: NativeSnapshot = try run { engine.start(config: config(), completion: $0) }
+        store.failOnAppend = true  // from now on nothing reaches the disk
+        XCTAssertThrowsError(
+            try { let _: NativeSnapshot = try run { engine.pause(sessionId: "s", completion: $0) } }()
+        ) { error in
+            XCTAssertEqual((error as? PigeonError)?.code, TrackingErrorCode.pauseFailed)
+        }
+    }
+
+    func testStartFailsWhenTheOpenSessionPointerCannotBeWritten() throws {
+        let store = MemoryStore()
+        store.failMarkActive = true
+        let engine = makeEngine(FakeProvider(clock: clock), store)
+        XCTAssertThrowsError(
+            try { let _: NativeSnapshot = try run { engine.start(config: config(), completion: $0) } }()
+        ) { error in
+            XCTAssertEqual((error as? PigeonError)?.code, TrackingErrorCode.startFailed)
+        }
+        XCTAssertEqual(engine.snapshot().state, .idle, "a recording nothing could recover is not started")
+    }
+
+    func testARecoveryDecidedBeforeANewStartNeverReplacesTheNewSession() throws {
+        let store = MemoryStore()
+        let dyingProvider = FakeProvider(clock: clock)
+        let dying = makeEngine(dyingProvider, store)
+        let _: NativeSnapshot = try run { dying.start(config: config("a"), completion: $0) }
+        clock.seconds += 5
+        let provider = FakeProvider(clock: clock)
+        let engine = makeEngine(provider, store)
+        let started = expectation(description: "B started")
+        // While the recovery reads A's journal, the person starts B.
+        store.onRead = { id in
+            guard id == "a" else { return }
+            store.onRead = nil
+            engine.start(config: self.config("b")) { _ in started.fulfill() }
+        }
+        let recovered: NativeSnapshot? = try run { engine.recoverActive(completion: $0) }
+        wait(for: [started], timeout: 5)
+        XCTAssertEqual(try XCTUnwrap(recovered).sessionId, "b", "the session the person started wins")
+        XCTAssertEqual(engine.snapshot().sessionId, "b")
+        XCTAssertEqual(engine.snapshot().state, .running)
+        XCTAssertEqual(provider.stops, 0, "B's location updates were not stopped by the older recovery")
+    }
+
+    func testAPauseWaitingToBePersistedNeverAnswersWithAnotherSessionsSnapshot() throws {
+        let store = MemoryStore()
+        let provider = FakeProvider(clock: clock)
+        let engine = makeEngine(provider, store)
+        let _: NativeSnapshot = try run { engine.start(config: config("a"), completion: $0) }
+        let startedB = expectation(description: "B started")
+        store.onFlush = {
+            store.onFlush = nil
+            engine.start(config: self.config("b")) { _ in startedB.fulfill() }
+        }
+        XCTAssertThrowsError(
+            try { let _: NativeSnapshot = try run { engine.pause(sessionId: "a", completion: $0) } }()
+        ) { error in
+            XCTAssertEqual((error as? PigeonError)?.code, TrackingErrorCode.superseded)
+        }
+        wait(for: [startedB], timeout: 5)
     }
 }

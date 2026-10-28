@@ -52,6 +52,7 @@ class TrackingConfig {
     this.minDistanceMeters = 0,
     this.initialStrideMeters,
     this.recoveryStepEvidenceAfter = const Duration(seconds: 30),
+    this.maxRecoverGap,
   });
 
   /// Speed ceiling per sport (m/s): running 10 and cycling 25 (starting values,
@@ -128,4 +129,9 @@ class TrackingConfig {
   /// standing). Shorter gaps are not judged: Android may deliver steps ~10 s
   /// late. [Duration.zero] disables the rule.
   final Duration recoveryStepEvidenceAfter;
+
+  /// After a process death the calendar time that passed is credited to the session's clock (the person may have
+  /// kept moving). A dead interval LONGER than this is not credited: the session is parked paused at its last
+  /// event instead, so a phone left behind overnight does not record all night. Null = no limit.
+  final Duration? maxRecoverGap;
 }
