@@ -4,6 +4,28 @@ First beta. **Not tested on a physical device yet** (battery, background
 survival and OEM behaviour are unmeasured) and every threshold is an unmeasured
 starting value.
 
+### Contracts hardened after independent review
+
+* **Journal v2:** every tick is journaled; `,` and all separators are escaped; refused inputs are
+  not journaled and never throw; replay stops at the first impossible record; segment step
+  finality is per segment (`Y`).
+* **Steps:** a step reading is validated against its measurement time before it touches any
+  counter; a weak step batch attaches only to the OPEN weak interval; moving time is not
+  credited while the verdict is stationary; a weak start is reported once as uncredited.
+* **Durability:** `journalFailed` (sticky) next to `journalPending`; Android and iOS writers keep
+  lost lines pending and rewrite files atomically; `TrackingSession.snapshot.isDurable` is false
+  after any write failure.
+* **Android:** the foreground service must acknowledge `startForeground` before recording starts
+  (`FOREGROUND_START_FAILED` otherwise); the journal writer is a single-thread coroutine that is
+  released after stop; a fix's calendar time is fixed when it is accepted.
+* **iOS:** every async boundary re-checks an operation token: a second `stop` joins the first, a
+  finish overtaken by a new session fails with `SUPERSEDED`, a late location error is ignored.
+* **Dart:** snapshots are compared field by field (nothing can be forgotten); a closed presenter
+  dispatcher never calls the presenter; a `TrackingSession` records once; `finish` fails unless
+  native answered `stopped`.
+* **Release:** the workflow runs on macOS, gates analyze/tests/core tests/example build, builds
+  and verifies the XCFramework, and `ios/.pubignore` ships it in the package.
+
 ### Engine (shared Kotlin core, `tracking-core`)
 
 * A deterministic distance engine decides what counts as distance from raw fixes
@@ -118,7 +140,8 @@ join a gap already credited, a watch producer is designed for but not built.
 
 ### Tests
 
-144 shared-core (incl. exact journal replay, finished-session restore, reboot, engine
-version, reprocess, drift limits, step accounting; a ten-hour replay measured at ~0.2 s), 40
-Android (31 engine, 9 file store), 34 iOS engine and 78 Dart tests pass; 11 CSV fixtures
+173 shared-core (incl. exact journal replay, finished-session restore, reboot, engine
+version, reprocess, drift limits, step accounting, the encoding/tick/finality contracts; a
+ten-hour replay measured at ~0.2 s), 47 Android (31 engine + 3 audit probes, 9 file store,
+4 foreground handshake), 39 iOS engine and 87 Dart tests pass; 11 CSV fixtures
 agree on both engines. No device test: see `doc/DEVICE_TESTS.md`.

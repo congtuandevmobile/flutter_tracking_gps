@@ -14,3 +14,7 @@ Implements the project rule "never swallow an error": every native failure becom
 
 ## Used by
 `TrackingEngine.swift`.
+
+## Recheck update
+
+`SUPERSEDED`: an operation was replaced by a newer session before it could finish.

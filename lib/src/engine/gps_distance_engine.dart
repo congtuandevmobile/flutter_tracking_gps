@@ -65,6 +65,9 @@ class GpsDistanceEngine {
   double _pendingPdr = 0;
   bool _stepSensorActive = false;
   int _stepsInGap = 0;
+
+  /// When the CURRENT weak interval began; null while GPS is measuring. Step batches attach only to it.
+  DateTime? _openWeakStart;
   final _marks = <_Mark>[];
   late final StopDetector _stops = StopDetector(
     radiusMeters: config.stopRadiusMeters,
@@ -231,6 +234,11 @@ class GpsDistanceEngine {
       _stride.addSteps(steps);
     } else if (wholly == -1) {
       _stride.breakWindow();
+      final open = _openWeakStart;
+      if (open == null || begin.isBefore(open)) {
+        // A batch of an earlier weak interval: kept, but it never funds a later gap.
+        return;
+      }
       if (_quality != GpsQuality.good && _quality != GpsQuality.recovering) {
         _stepsInGap += steps;
       }
@@ -250,12 +258,14 @@ class GpsDistanceEngine {
     _marks
       ..clear()
       ..add(_Mark(at, good: false));
+    _openWeakStart = at;
   }
 
   void _mark(DateTime at, {required bool good}) {
     if (_marks.isNotEmpty && _marks.last.good == good) return;
     final last = _marks.isEmpty ? null : _marks.last.at;
     final when = (last != null && at.isBefore(last)) ? last : at;
+    _openWeakStart = good ? null : when;
     _marks.add(_Mark(when, good: good));
     while (_marks.length > 2 &&
         _marks[1].at.isBefore(when.subtract(const Duration(minutes: 2)))) {
@@ -384,6 +394,7 @@ class GpsDistanceEngine {
     if (anchor == null) {
       _anchor = fix;
       _markGood(now, fix);
+      _stepsInGap = 0;
       if (_pendingPdr > 0) _dropPending(now, 'no anchor to confirm it');
       log.note(now, 'anchor set');
       return const FixResult(FixVerdict.anchor);
@@ -456,6 +467,7 @@ class GpsDistanceEngine {
     _rejectStreak = 0;
     _markGood(now, fix);
     _dropPending(now, 'normal GPS interval covers the short degraded period');
+    _stepsInGap = 0;
 
     final speed = _trustedSpeed(fix);
     if (speed != null && speed < config.stationarySpeedMps) {

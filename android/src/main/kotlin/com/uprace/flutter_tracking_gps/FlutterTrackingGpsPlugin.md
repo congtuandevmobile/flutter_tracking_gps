@@ -44,3 +44,7 @@ Coroutines and Flow, no `!!`, resources released on detach, every error a `Flutt
 `start` always starts `TrackingService`. `resume` first starts it again from the notification text stored in the journal; if the OS refuses, recording does NOT continue: the session stays paused and the call fails with `FOREGROUND_START_FAILED`. New `listSessions()`. `NativeForegroundMode` no longer exists.
 
 New `updateNotification(title, text)` forwards to `TrackingService.update`.
+
+## Recheck update
+
+`start` and `resume` wait for the foreground acknowledgement (`ForegroundHandshake`, 5 s) before recording; on failure or timeout the service is stopped and `FOREGROUND_START_FAILED` is returned. `resume` validates session and state BEFORE any side effect. An existing `FlutterError` keeps its own code.

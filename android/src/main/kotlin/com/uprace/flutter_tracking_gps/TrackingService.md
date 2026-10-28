@@ -24,3 +24,7 @@ Start from the foreground ("while in use" is enough). Started and stopped by `Fl
 Updated: the SDK ALWAYS runs this service while a session records (no `external` mode any more), so the recording never depends on a third party. A presenter that wants a richer surface can replace the notification's content by posting with `TrackingService.NOTIFICATION_ID` and `CHANNEL_ID` (public constants). On resume after a process death the plugin starts it BEFORE recording continues.
 
 The SDK OWNS the notification: `NOTIFICATION_ID` and `CHANNEL_ID` are private again. A presenter changes the text through `TrackingService.update` (Dart: `updateNotification`); the channel, tap action and lifecycle stay the SDK's.
+
+## Recheck update
+
+After `startForeground` the service calls `handshake.acknowledge()`; if the OS refuses it calls `handshake.fail` and stops itself.

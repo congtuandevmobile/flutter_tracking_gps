@@ -17,13 +17,20 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' ||
       contains(github.event.head_commit.message, '[release:flutter_tracking_gps]')
-    runs-on: ubuntu-latest
+    # macOS: the iOS XCFramework of the shared Kotlin core can only be built here, and it must ship in the package.
+    runs-on: macos-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -32,6 +39,37 @@ jobs:
 
       - name: Install dependencies
         run: flutter pub get
+
+      # Gates: nothing is published unless every layer passes.
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Dart tests
+        run: flutter test
+
+      - name: Core tests (Kotlin)
+        working-directory: tracking-core
+        run: ./gradlew --no-daemon jvmTest
+
+      - name: Build the iOS XCFramework (release)
+        run: tool/build_core.sh release
+
+      - name: Verify the XCFramework slices
+        run: |
+          set -e
+          FW=ios/Frameworks/TrackingCore.xcframework
+          for slice in ios-arm64 ios-arm64_x86_64-simulator; do
+            if [ ! -d "$FW/$slice" ]; then
+              echo "❌ missing slice $slice in $FW"
+              ls "$FW"
+              exit 1
+            fi
+          done
+          echo "✅ slices present"; ls "$FW"
+
+      - name: Build the example app for the iOS simulator
+        working-directory: example
+        run: flutter build ios --simulator --no-codesign
 
       - name: Read package version
         id: version
@@ -76,6 +114,13 @@ jobs:
 
       - name: Validate package (dry run)
         run: flutter pub publish --dry-run
+
+      - name: Verify the XCFramework is inside the package
+        run: |
+          set -e
+          # The package archive is what users get: the framework must be in it (it is git-ignored, ios/.pubignore re-includes it).
+          flutter pub publish --dry-run 2>&1 | tee dryrun.txt
+          grep -q "TrackingCore.xcframework" dryrun.txt || { echo "❌ TrackingCore.xcframework is not part of the package"; exit 1; }
 
       - name: Write pub credentials
         run: |

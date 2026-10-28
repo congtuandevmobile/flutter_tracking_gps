@@ -13,3 +13,7 @@ Used by `JournalCodec` and `SessionRecorder`. Tested by `JournalTest`.
 `Header.engineVersion` is the rules version that produced the recorded result.
 
 `Finalized(stepsFinal)`: written once after `Finish`; true when the platform's exact step count was obtained (or there is no step sensor).
+
+## Recheck update
+
+`Header` carries `engineVersion`; `SegmentSettled(segmentId, exact)` (code `Y`) records whether one segment's step count became exact; `Finalized(stepsFinal)` (`Z`) is written once after Finish.

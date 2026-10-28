@@ -5,13 +5,14 @@ import tracker.bridge.BridgeSnapshot
 import tracker.bridge.TrackingCoreBridge
 
 /**
- * Where the journal goes. The host implements it with ONE serial writer: [append]
- * must not block or reorder, and [flush] must return only when every appended
- * line is on disk (it is the barrier before a read, a clear or a finish).
+ * Where the journal goes. The host implements it with ONE serial writer: [append] must not block or
+ * reorder, and [flush] must return only when every appended line is durable. It returns `true` ONLY when
+ * that is so: a write or sync failure, or a barrier that timed out, is `false` and stays `false` (the host
+ * keeps the failure sticky), so a lost line can never be reported as saved.
  */
 interface JournalSink {
     fun append(line: String)
-    fun flush()
+    fun flush(): Boolean
 }
 
 /** What a restore found. */
@@ -37,12 +38,20 @@ class RestoreResult(
     val stepsFinal: Boolean = false,
 )
 
+/** A start that cannot throw across the platform boundary (Kotlin exceptions are not catchable from Swift). */
+class StartResult(val recorder: SessionRecorder?, val error: String?)
+
 /**
- * The engine plus its journal, in ONE place, so Android, iOS and a watch record
- * and restore identically. Every input is written to the journal BEFORE it is
- * applied (write-ahead), and the engine is a pure function of those inputs, so
- * replaying the journal reproduces the live result exactly: the distance, the
- * pending estimates, the stride, the step totals, the gaps and the times.
+ * The engine plus its journal, in ONE place, so Android, iOS and a watch record and restore identically. Every
+ * input is written to the journal BEFORE it is applied (write-ahead), and the engine is a pure function of
+ * those inputs, so replaying the journal reproduces the live result exactly: the distance, the pending
+ * estimates, the stride, the step totals, the gaps and the times (EVERY tick is an input: the active time of a
+ * running leg depends on it).
+ *
+ * An input that is invalid in the current state (a pause while not recording, a resume that does not open a new
+ * segment...) is NOT journaled: a journal only ever holds inputs the engine accepts, so it can always be
+ * replayed. No public method throws: a refused input sets [lastFailure] instead, because a Kotlin exception
+ * would crash an iOS app.
  *
  * Not thread-safe: call it from one serial context.
  */
@@ -55,27 +64,56 @@ class SessionRecorder private constructor(
     var lastPlan: BridgePlan? = null
         private set
 
-    private var lastQuality = 0
-
     /** True once the step total of a FINISHED session was settled (journaled by [markFinalized]). */
     var stepsFinal: Boolean = false
         private set
 
+    /** Why the latest input was refused, or null. Sticky until the next refusal; never thrown. */
+    var lastFailure: String? = null
+        private set
+
+    private var lastAcceptedWallMs = -1L
+
+    /** Segments in which the step sensor was active, and the ones whose exact count was obtained. */
+    private val steppedSegments = HashSet<Int>()
+    private val exactSegments = HashSet<Int>()
+
     // ── Lifecycle ───────────────────────────────────────────────────────────
 
-    fun pause(atMs: Long) = record(JournalRecord.Pause(atMs)) { bridge.pause(atMs) }
+    fun pause(atMs: Long) {
+        if (bridge.snapshot().state != STATE_RUNNING) return refuse("pause while not recording")
+        record(JournalRecord.Pause(atMs)) { bridge.pause(atMs) }
+    }
 
-    fun resume(atMs: Long, segmentId: Int) = record(JournalRecord.Resume(atMs, segmentId)) { bridge.resume(atMs, segmentId) }
+    fun resume(atMs: Long, segmentId: Int) {
+        val s = bridge.snapshot()
+        if (s.state != STATE_PAUSED) return refuse("resume while not paused")
+        if (segmentId <= s.segmentId) return refuse("a resume must open a NEW segment")
+        record(JournalRecord.Resume(atMs, segmentId)) { bridge.resume(atMs, segmentId) }
+    }
 
-    fun finish(atMs: Long) = record(JournalRecord.Finish(atMs)) { bridge.finish(atMs) }
+    fun finish(atMs: Long) {
+        val state = bridge.snapshot().state
+        if (state == STATE_IDLE || state == STATE_FINISHED) return
+        record(JournalRecord.Finish(atMs)) { bridge.finish(atMs) }
+    }
 
     /**
-     * Settles a finished session: [stepsFinal] says whether the step total is exact (the platform's
-     * exact count was obtained, or there is no step sensor) or only the live count. Journaled, so a
-     * restore of a finished session reports the same finality as the live result. Call once, after
-     * [finish] and after any [correctClosedSegment].
+     * Settles a finished session: [stepsFinal] says whether the step total is exact or only the live count.
+     * Journaled, so a restore of a finished session reports the same finality as the live result. Call once,
+     * after [finish] and after any [correctClosedSegment].
      */
     fun markFinalized(stepsFinal: Boolean) = record(JournalRecord.Finalized(stepsFinal)) { this.stepsFinal = stepsFinal }
+
+    /**
+     * The exact step count of the CLOSED [segmentId] was obtained ([exact] true) or could not be. Journaled per
+     * segment: the session's steps are exact ([allStepsExact]) only when every segment with an active sensor is.
+     */
+    fun markSegmentSettled(segmentId: Int, exact: Boolean) =
+        record(JournalRecord.SegmentSettled(segmentId, exact)) { if (exact) exactSegments.add(segmentId) else exactSegments.remove(segmentId) }
+
+    /** True when every segment in which the step sensor was active has an exact count (vacuously true with none). */
+    fun allStepsExact(): Boolean = steppedSegments.all { it in exactSegments }
 
     // ── Inputs ──────────────────────────────────────────────────────────────
 
@@ -90,18 +128,23 @@ class SessionRecorder private constructor(
             speedAccuracy, course, altitude, verticalAccuracy, provider, isMock, nowMs,
         )
         sink.append(JournalCodec.encode(r))
-        return applyFix(r)
+        return guarded(-1) { applyFix(r) }
     }
 
-    /** A 1 Hz tick. Written to the journal only when it changed the state. Returns the quality code. */
+    /**
+     * A 1 Hz tick. EVERY tick is journaled: it moves the running leg's active time and detects silence, so a
+     * restore that did not see it would lose time that was shown. Returns the quality code.
+     */
     fun onTick(nowMs: Long): Int {
-        val q = bridge.onTick(nowMs)
-        if (q != lastQuality && q == UNAVAILABLE) sink.append(JournalCodec.encode(JournalRecord.Tick(nowMs)))
-        lastQuality = q
-        return q
+        if (bridge.snapshot().state != STATE_RUNNING) return bridge.snapshot().quality
+        sink.append(JournalCodec.encode(JournalRecord.Tick(nowMs)))
+        return guarded(bridge.snapshot().quality) { bridge.onTick(nowMs) }
     }
 
-    fun setStepSensorActive(active: Boolean) = record(JournalRecord.StepSensor(active)) { bridge.setStepSensorActive(active) }
+    fun setStepSensorActive(active: Boolean) = record(JournalRecord.StepSensor(active)) {
+        bridge.setStepSensorActive(active)
+        if (active) steppedSegments.add(bridge.snapshot().segmentId)
+    }
 
     fun onStepCounter(segmentId: Int, measuredAtMs: Long, deliveredAtMs: Long, raw: Long) =
         record(JournalRecord.StepCounter(segmentId, measuredAtMs, deliveredAtMs, raw)) {
@@ -125,14 +168,34 @@ class SessionRecorder private constructor(
     fun report(): String = bridge.report()
     fun samplingPlan(nowMs: Long): BridgePlan = bridge.samplingPlan(nowMs)
 
-    /** Barrier: returns when everything appended so far is durable. Call before reading, clearing or reporting a final result. */
-    fun flush() = sink.flush()
+    /**
+     * The CALENDAR time of the latest accepted fix, taken from that fix at ingest (so it never moves when the user
+     * changes the system clock) and rebuilt from the journal on restore; -1 when there is none.
+     */
+    fun lastAcceptedFixWallMs(): Long = if (bridge.snapshot().lastFixAtMs < 0) -1 else lastAcceptedWallMs
+
+    /** Barrier: true only when everything appended so far is DURABLE. Call before reading, clearing or reporting a final result. */
+    fun flush(): Boolean = sink.flush()
 
     // ── Internals ───────────────────────────────────────────────────────────
 
+    private fun refuse(why: String) {
+        lastFailure = why
+    }
+
+    private inline fun <T> guarded(fallback: T, block: () -> T): T = try {
+        block()
+    } catch (e: IllegalArgumentException) {
+        lastFailure = e.message ?: "illegal argument"
+        fallback
+    } catch (e: IllegalStateException) {
+        lastFailure = e.message ?: "illegal state"
+        fallback
+    }
+
     private inline fun record(r: JournalRecord, apply: () -> Unit) {
         sink.append(JournalCodec.encode(r))
-        apply()
+        guarded(Unit) { apply() }
     }
 
     private fun applyFix(r: JournalRecord.Fix): Int {
@@ -140,10 +203,12 @@ class SessionRecorder private constructor(
             r.sessionId, r.segmentId, r.seq, r.timeMs, r.latitude, r.longitude,
             r.horizontalAccuracy, r.speed, r.speedAccuracy, r.isMock, r.nowMs, false,
         )
+        if (bridge.snapshot().lastFixAtMs == r.timeMs) lastAcceptedWallMs = r.wallTimeMs
         if (settings.adaptiveSampling) lastPlan = bridge.samplingPlan(r.nowMs)
         return verdict
     }
 
+    /** Applies a journaled record; throws only when the record is semantically impossible (valid CRC, invalid content). */
     private fun applyReplay(r: JournalRecord) {
         when (r) {
             is JournalRecord.Header -> Unit
@@ -151,62 +216,94 @@ class SessionRecorder private constructor(
             is JournalRecord.Resume -> bridge.resume(r.atMs, r.segmentId)
             is JournalRecord.Finish -> bridge.finish(r.atMs)
             is JournalRecord.Fix -> applyFix(r)
-            is JournalRecord.Tick -> lastQuality = bridge.onTick(r.atMs)
+            is JournalRecord.Tick -> bridge.onTick(r.atMs)
             is JournalRecord.StepCounter -> bridge.onStepCounter(r.segmentId, r.measuredAtMs, r.deliveredAtMs, r.raw)
             is JournalRecord.SegmentSteps -> bridge.onSegmentSteps(r.segmentId, r.measuredAtMs, r.deliveredAtMs, r.count)
             is JournalRecord.StepsCorrection -> bridge.correctClosedSegment(r.exactSteps)
-            is JournalRecord.StepSensor -> bridge.setStepSensorActive(r.active)
+            is JournalRecord.StepSensor -> {
+                bridge.setStepSensorActive(r.active)
+                if (r.active) steppedSegments.add(bridge.snapshot().segmentId)
+            }
             is JournalRecord.Pdr -> bridge.submitPdr(r.segmentId, r.atMs, r.meters)
             is JournalRecord.Finalized -> stepsFinal = r.stepsFinal
+            is JournalRecord.SegmentSettled -> if (r.exact) exactSegments.add(r.segmentId) else exactSegments.remove(r.segmentId)
         }
     }
 
     companion object {
-        private const val UNAVAILABLE = 3
+        private const val STATE_IDLE = 0
+        private const val STATE_RUNNING = 1
+        private const val STATE_PAUSED = 2
+        private const val STATE_FINISHED = 3
 
         /**
-         * Starts a new session: writes the header (configuration, identity and the
-         * host's [extras]) and starts the engine.
+         * Starts a new session: writes the header (configuration, identity and the host's [extras]) and starts the
+         * engine. Throws on invalid settings; the platform layers use [tryStart], which never throws.
          */
         fun start(
             sink: JournalSink, settings: BridgeSettings, sessionId: String, atMs: Long, wallAtMs: Long,
             segmentId: Int, initialSteps: Long, extras: Map<String, String>,
         ): SessionRecorder {
             val bridge = settings.toBridge()
+            // The engine is started BEFORE the header is written: a header is only ever written for a session
+            // the engine accepted, so a journal never starts with an input that cannot be replayed.
+            bridge.start(sessionId, atMs, segmentId, initialSteps)
             val header = JournalRecord.Header(
                 JournalCodec.VERSION, JournalCodec.ENGINE_VERSION, sessionId, atMs, wallAtMs, segmentId, initialSteps, settings, extras,
             )
             sink.append(JournalCodec.encode(header))
-            bridge.start(sessionId, atMs, segmentId, initialSteps)
             return SessionRecorder(sink, settings, bridge)
         }
 
+        /** [start] without a throw: invalid settings or ids come back as [StartResult.error] and nothing is written. */
+        fun tryStart(
+            sink: JournalSink, settings: BridgeSettings, sessionId: String, atMs: Long, wallAtMs: Long,
+            segmentId: Int, initialSteps: Long, extras: Map<String, String>,
+        ): StartResult = try {
+            StartResult(start(sink, settings, sessionId, atMs, wallAtMs, segmentId, initialSteps, extras), null)
+        } catch (e: IllegalArgumentException) {
+            StartResult(null, e.message ?: "invalid settings")
+        } catch (e: IllegalStateException) {
+            StartResult(null, e.message ?: "invalid state")
+        }
+
         /**
-         * Rebuilds a session from its journal lines by replaying every record with
-         * the configuration stored in the header. A session that was running comes
-         * back PAUSED: a `Pause` is appended at the time of the LAST journaled
-         * event, not at "now", so the time the process was dead is never counted as
-         * workout time, and a reboot (the monotonic clock restarts) cannot make the
-         * leg's duration negative. `resume` continues in a new segment, so nothing
-         * measured on the old clock is ever joined to the new one. [recorder] is null
-         * when nothing usable was found. Restore REBUILDS what was shown; to compute
-         * it again with other settings use [reprocess].
+         * Rebuilds a session from its journal lines by replaying every record with the configuration stored in
+         * the header. A session that was running comes back PAUSED: a `Pause` is appended at the time of the LAST
+         * journaled event, not at "now", so the time the process was dead is never counted as workout time, and a
+         * reboot (the monotonic clock restarts) cannot make the leg's duration negative. `resume` continues in a
+         * new segment, so nothing measured on the old clock is ever joined to the new one.
+         *
+         * Replay STOPS at the first record that cannot be applied (valid CRC but impossible content): everything
+         * after it is NOT applied, the status becomes `CORRUPT` and `damagedLine` points at it. [recorder] is null
+         * when nothing usable was found. Restore REBUILDS what was shown; to compute it again with other settings
+         * use [reprocess].
          */
         fun restore(sink: JournalSink, lines: List<String>): RestoreResult {
             val contents = JournalCodec.read(lines)
             val header = contents.records.firstOrNull() as? JournalRecord.Header
-            if (header == null) {
-                return RestoreResult(null, contents.status, contents.damagedLine, "", 0, 0, 0, -1, emptyMap())
+                ?: return RestoreResult(null, contents.status, contents.damagedLine, "", 0, 0, 0, -1, emptyMap())
+            val bridge = try {
+                header.settings.toBridge().also { it.start(header.sessionId, header.atMs, header.segmentId, header.initialSteps) }
+            } catch (e: IllegalArgumentException) {
+                return RestoreResult(null, JournalStatus.CORRUPT, 0, "", 0, 0, 0, -1, emptyMap())
             }
-            val recorder = SessionRecorder(sink, header.settings, header.settings.toBridge())
-            recorder.bridge.start(header.sessionId, header.atMs, header.segmentId, header.initialSteps)
+            val recorder = SessionRecorder(sink, header.settings, bridge)
             var nextSeq = 0L
             var fixes = 0
             var lastWall = -1L
             var segment = header.segmentId
             var lastEventMs = header.atMs
-            for (r in contents.records) {
-                recorder.applyReplay(r)
+            var status = contents.status
+            var damaged = contents.damagedLine
+            for ((index, r) in contents.records.withIndex()) {
+                try {
+                    recorder.applyReplay(r)
+                } catch (e: IllegalArgumentException) {
+                    status = JournalStatus.CORRUPT; damaged = index; break
+                } catch (e: IllegalStateException) {
+                    status = JournalStatus.CORRUPT; damaged = index; break
+                }
                 r.eventTimeMs()?.let { lastEventMs = it }
                 when (r) {
                     is JournalRecord.Fix -> {
@@ -219,19 +316,18 @@ class SessionRecorder private constructor(
                 }
             }
             val s = recorder.bridge.snapshot()
-            if (s.state == 1) recorder.pause(lastEventMs) // it was recording when the process died
+            if (s.state == STATE_RUNNING) recorder.pause(lastEventMs) // it was recording when the process died
             return RestoreResult(
-                recorder, contents.status, contents.damagedLine, header.sessionId, segment, nextSeq, fixes, lastWall,
+                recorder, status, damaged, header.sessionId, segment, nextSeq, fixes, lastWall,
                 header.extras, header.engineVersion, header.engineVersion != JournalCodec.ENGINE_VERSION,
-                finished = s.state == 3, stepsFinal = recorder.stepsFinal,
+                finished = s.state == STATE_FINISHED, stepsFinal = recorder.stepsFinal,
             )
         }
 
         /**
-         * REPROCESS: replays the journal's inputs through the CURRENT engine, optionally with
-         * other [settings] than the ones it was recorded with, and returns the result without
-         * touching any file. Unlike [restore] the result may differ from what was shown live;
-         * use it to recompute after a rule change, never to resume a session.
+         * REPROCESS: replays the journal's inputs through the CURRENT engine, optionally with other [settings] than
+         * the ones it was recorded with, and returns the result without touching any file. Unlike [restore] the
+         * result may differ from what was shown live; use it to recompute after a rule change, never to resume.
          */
         fun reprocess(lines: List<String>, settings: BridgeSettings? = null): BridgeSnapshot? {
             val contents = JournalCodec.read(lines)
@@ -239,13 +335,28 @@ class SessionRecorder private constructor(
             val used = settings ?: header.settings
             val sink = object : JournalSink {
                 override fun append(line: String) {}
-                override fun flush() {}
+                override fun flush(): Boolean = true
             }
-            val recorder = SessionRecorder(sink, used, used.toBridge())
+            val recorder = try {
+                SessionRecorder(sink, used, used.toBridge())
+            } catch (e: IllegalArgumentException) {
+                return null
+            }
             recorder.bridge.start(header.sessionId, header.atMs, header.segmentId, header.initialSteps)
-            for (r in contents.records) recorder.applyReplay(r)
+            for (r in contents.records) {
+                try {
+                    recorder.applyReplay(r)
+                } catch (e: IllegalArgumentException) {
+                    break
+                } catch (e: IllegalStateException) {
+                    break
+                }
+            }
             return recorder.bridge.snapshot()
         }
+
+        /** The raw fixes of a journal, oldest first (for drawing or exporting the route). */
+        fun fixes(lines: List<String>): List<JournalRecord.Fix> = JournalCodec.read(lines).records.filterIsInstance<JournalRecord.Fix>()
 
         /** The time a record carries on the engine's clock, or null when it carries none. */
         private fun JournalRecord.eventTimeMs(): Long? = when (this) {
@@ -258,10 +369,8 @@ class SessionRecorder private constructor(
             is JournalRecord.StepCounter -> deliveredAtMs
             is JournalRecord.SegmentSteps -> deliveredAtMs
             is JournalRecord.Pdr -> atMs
-            is JournalRecord.StepsCorrection, is JournalRecord.StepSensor, is JournalRecord.Finalized -> null
+            is JournalRecord.StepsCorrection, is JournalRecord.StepSensor, is JournalRecord.Finalized,
+            is JournalRecord.SegmentSettled -> null
         }
-
-        /** The raw fixes of a journal, oldest first (for drawing or exporting the route). */
-        fun fixes(lines: List<String>): List<JournalRecord.Fix> = JournalCodec.read(lines).records.filterIsInstance<JournalRecord.Fix>()
     }
 }

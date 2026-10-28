@@ -96,6 +96,9 @@ class GpsDistanceEngine(
     private var stepSensorActive = false
     private var stepsInGap = 0L
 
+    /** When the CURRENT weak interval began (GPS not measuring), or null while GPS is measuring. Step batches attach only to it. */
+    private var openWeakStartMs: Long? = null
+
     /** Where GPS was measuring (true) or not (false), from the given time on. Bounded. */
     private class Mark(val atMs: Long, val good: Boolean)
     private val marks = ArrayDeque<Mark>()
@@ -162,6 +165,7 @@ class GpsDistanceEngine(
         rejectStreak = 0
         pendingPdr = 0.0
         movingTimeMs = 0
+        openWeakStartMs = null
         activeClosedMs = 0
         lastNowMs = atMs
         bridgedGapMs = 0
@@ -298,6 +302,11 @@ class GpsDistanceEngine(
             }
             -1 -> {
                 stride.breakWindow()
+                val open = openWeakStartMs
+                if (open == null || from < open) {
+                    log.note(deliveredAtMs, "steps batch of an earlier weak interval: kept in the total, not attached to this gap")
+                    return
+                }
                 if (quality != GpsQuality.GOOD && quality != GpsQuality.RECOVERING) stepsInGap += steps
                 if (config.pdrPolicy == PdrPolicy.OFF) return
                 val perStep = stride.strideMeters ?: return
@@ -328,6 +337,7 @@ class GpsDistanceEngine(
     private fun resetMarks(atMs: Long) {
         marks.clear()
         marks.addLast(Mark(atMs, false))
+        openWeakStartMs = atMs
     }
 
     /** Records that GPS measuring ([good]) changed at [atMs]; times never go backwards. */
@@ -335,6 +345,9 @@ class GpsDistanceEngine(
         val last = marks.lastOrNull()
         if (last != null && last.good == good) return
         val at = if (last != null && atMs < last.atMs) last.atMs else atMs
+        // A weak interval has an identity: its start. A batch measured before the OPEN one's start belongs to an
+        // interval GPS already owns again and must never fund a later gap.
+        openWeakStartMs = if (good) null else at
         marks.addLast(Mark(at, good))
         // Keep two minutes of history (batches arrive up to ~10 s late) plus the mark before it.
         while (marks.size > 2 && marks[1].atMs < at - TIMELINE_KEEP_MS) marks.removeFirst()
@@ -435,8 +448,17 @@ class GpsDistanceEngine(
         if (previous == null) {
             smoother?.reset()
             smoother?.push(fix.latitude, fix.longitude, accuracy, fix.timeMs)
+            // The interval from the leg start (or the last healthy fix) to this first good fix was NOT measured:
+            // report it as uncredited, once, exactly like a gap (short startup latency below the silence limit is not).
+            val unmeasuredMs = fix.timeMs - (lastHealthyMs ?: legStartedAtMs)
+            if (unmeasuredMs > silenceAfterMs) {
+                uncreditedGapMs += unmeasuredMs
+                uncreditedGaps++
+                log.note(nowMs, "first good fix after ${unmeasuredMs / 1000}s without GPS: that interval is uncredited")
+            }
             anchor = fix
             markHealthy(nowMs, fix)
+            stepsInGap = 0
             if (pendingPdr > 0.0) dropPending(nowMs, "no anchor to confirm it")
             log.note(nowMs, "anchor set")
             return FixResult(FixVerdict.ANCHOR)
@@ -497,10 +519,11 @@ class GpsDistanceEngine(
             return FixResult(FixVerdict.JUMP)
         }
         rejectStreak = 0
-        markHealthy(nowMs, fix)
-        // The normal GPS interval already owns this displacement. Keeping an
-        // estimate from a short degraded period would leak it into a later gap.
+        val movingCandidateMs = markHealthy(nowMs, fix)
+        // The normal GPS interval already owns this displacement. Keeping an estimate (or the step evidence)
+        // of a short degraded period would leak it into a later gap.
         dropPending(nowMs, "normal GPS interval covers the short degraded period")
+        stepsInGap = 0
 
         // Doppler is only believed when its own accuracy is decent.
         val dopplerSpeed = trustedSpeed(fix)
@@ -519,6 +542,8 @@ class GpsDistanceEngine(
         // The anchor stays put inside the noise radius, so drift cannot add up
         // one small step at a time while real movement still accumulates.
         val noise = maxOf(config.minStepMeters, config.accuracyNoiseFactor * maxOf(previous.horizontalAccuracy ?: 0.0, accuracy))
+        // Only a fix the motion decision did not call STATIONARY counts as moving time.
+        movingTimeMs += movingCandidateMs
         if (chord < noise) return FixResult(FixVerdict.NOISE)
 
         ledger.add(segmentId, DistanceSource.GPS, chord, nowMs)
@@ -541,7 +566,12 @@ class GpsDistanceEngine(
         return if (a == null || a <= SPEED_ACCURACY_LIMIT_MPS) s else null
     }
 
-    private fun markHealthy(nowMs: Long, fix: TrackingFix) {
+    /**
+     * Records that GPS is measuring. Returns the milliseconds this fix would add to the MOVING time (zero when the
+     * Doppler says slow, a stop is in effect, or the previous healthy fix is too old): the CALLER adds them only
+     * once the motion decision (stationary or not) is made, so a fix judged stationary never counts as moving.
+     */
+    private fun markHealthy(nowMs: Long, fix: TrackingFix): Long {
         if (quality != GpsQuality.GOOD) log.note(nowMs, "gps good")
         mark(fix.timeMs, true)
         quality = GpsQuality.GOOD
@@ -552,12 +582,14 @@ class GpsDistanceEngine(
         val stopped = stops.push(fix.timeMs, fix.latitude, fix.longitude, speed)
         val previousHealthy = lastHealthyMs
         val slow = speed != null && speed < config.stationarySpeedMps
+        var candidate = 0L
         if (previousHealthy != null && !stopped && !slow) {
             val dt = fix.timeMs - previousHealthy
-            if (dt in 1..silenceAfterMs) movingTimeMs += dt
+            if (dt in 1..silenceAfterMs) candidate = dt
         }
         lastHealthyMs = fix.timeMs
         lastHealthyFix = fix
+        return candidate
     }
 
     /** First good fix after a real gap: credits the gap once. */

@@ -100,6 +100,12 @@ class TrackingSession {
         _last.state == RecordingState.finishing) {
       throw TrackingStateError('a recording is already open');
     }
+    if (_last.state == RecordingState.finished) {
+      // One session, one recording: the presenter and the final snapshot belong to it.
+      throw TrackingStateError(
+        'this TrackingSession already finished; create a new one for the next recording',
+      );
+    }
     final permission = await _platform.permissionStatus();
     if (permission != PlatformPermission.granted) {
       throw TrackingStateError('location permission: ${permission.name}');
@@ -148,6 +154,14 @@ class TrackingSession {
       throw TrackingStateError('no recording to finish');
     }
     final native = await _platform.stop(id);
+    if (native.state != PlatformState.stopped) {
+      // Not final (still finishing, or native failed): say so, keep the session as it is.
+      _apply(native);
+      throw TrackingStateError(
+        'finish did not complete: native state is ${native.state.name}'
+        '${native.error == null ? '' : ' (${native.error})'}',
+      );
+    }
     await _sub?.cancel();
     _sub = null;
     _apply(native);
@@ -268,6 +282,10 @@ class TrackingSession {
       stepsStatus: native.stepsStatus,
       stepsFinal: native.stepsFinal,
       journalPending: native.journalPending,
+      // The error text is a second signal: a write failure can never look durable.
+      journalFailed:
+          native.journalFailed ||
+          (native.error?.startsWith('STORE_WRITE_FAILED') ?? false),
       restoreState: native.restoreState,
       engineChanged: native.engineChanged,
       distanceEligibleSteps: d.distanceEligibleSteps,
@@ -283,33 +301,8 @@ class TrackingSession {
       },
       error: native.error,
     );
-    final changed =
-        next.state != _last.state ||
-        next.quality != _last.quality ||
-        next.totalMeters != _last.totalMeters ||
-        next.pendingPdrMeters != _last.pendingPdrMeters ||
-        next.segmentId != _last.segmentId ||
-        next.speedMps != _last.speedMps ||
-        next.movingTime != _last.movingTime ||
-        next.isStopped != _last.isStopped ||
-        next.fixCount != _last.fixCount ||
-        next.steps != _last.steps ||
-        next.stepsStatus != _last.stepsStatus ||
-        next.strideMeters != _last.strideMeters ||
-        next.lastFixAt != _last.lastFixAt ||
-        next.gpsMeters != _last.gpsMeters ||
-        next.gapBridgeMeters != _last.gapBridgeMeters ||
-        next.pdrMeters != _last.pdrMeters ||
-        next.failureState != _last.failureState ||
-        next.error != _last.error ||
-        next.stepsFinal != _last.stepsFinal ||
-        next.journalPending != _last.journalPending ||
-        next.restoreState != _last.restoreState ||
-        next.engineChanged != _last.engineChanged ||
-        next.distanceEligibleSteps != _last.distanceEligibleSteps ||
-        next.uncreditedGap != _last.uncreditedGap ||
-        next.bridgedGap != _last.bridgedGap ||
-        next.ambiguousSteps != _last.ambiguousSteps;
+    // Whole-snapshot equality: a field added later can never be forgotten here.
+    final changed = next != _last;
     _last = next;
     if (changed && !_updates.isClosed) _updates.add(next);
   }

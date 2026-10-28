@@ -24,6 +24,7 @@ class TrackingSnapshot {
     this.error,
     this.stepsFinal = false,
     this.journalPending = 0,
+    this.journalFailed = false,
     this.restoreState = RestoreState.notRestored,
     this.engineChanged = false,
     this.distanceEligibleSteps = 0,
@@ -56,6 +57,7 @@ class TrackingSnapshot {
       error = null,
       stepsFinal = false,
       journalPending = 0,
+      journalFailed = false,
       restoreState = RestoreState.notRestored,
       engineChanged = false,
       distanceEligibleSteps = 0,
@@ -116,8 +118,13 @@ class TrackingSnapshot {
   /// of the latest events.
   final int journalPending;
 
-  /// Everything this snapshot shows has reached the disk.
-  bool get isDurable => journalPending == 0;
+  /// A journal write or sync FAILED (sticky for the session): those events are
+  /// not on disk and never will be, even though [journalPending] may look small.
+  final bool journalFailed;
+
+  /// Everything this snapshot shows has reached the disk: nothing pending AND
+  /// no write ever failed.
+  bool get isDurable => journalPending == 0 && !journalFailed;
 
   /// What the last restore found. [RestoreState.partial] means ONLY the part
   /// before a damaged record was restored: the numbers here are incomplete.
@@ -147,4 +154,73 @@ class TrackingSnapshot {
 
   /// Steps measured in a batch that straddles a GPS-quality change: used for nothing.
   final int ambiguousSteps;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is TrackingSnapshot &&
+          other.sessionId == sessionId &&
+          other.state == state &&
+          other.quality == quality &&
+          other.totalMeters == totalMeters &&
+          other.gpsMeters == gpsMeters &&
+          other.gapBridgeMeters == gapBridgeMeters &&
+          other.pdrMeters == pdrMeters &&
+          other.pendingPdrMeters == pendingPdrMeters &&
+          other.segmentId == segmentId &&
+          other.fixCount == fixCount &&
+          other.speedMps == speedMps &&
+          other.lastFixAt == lastFixAt &&
+          other.movingTime == movingTime &&
+          other.isStopped == isStopped &&
+          other.steps == steps &&
+          other.strideMeters == strideMeters &&
+          other.stepsStatus == stepsStatus &&
+          other.failureState == failureState &&
+          other.error == error &&
+          other.stepsFinal == stepsFinal &&
+          other.journalPending == journalPending &&
+          other.journalFailed == journalFailed &&
+          other.restoreState == restoreState &&
+          other.engineChanged == engineChanged &&
+          other.distanceEligibleSteps == distanceEligibleSteps &&
+          other.activeTime == activeTime &&
+          other.bridgedGap == bridgedGap &&
+          other.uncreditedGap == uncreditedGap &&
+          other.uncreditedGaps == uncreditedGaps &&
+          other.ambiguousSteps == ambiguousSteps;
+
+  @override
+  int get hashCode => Object.hashAll([
+        sessionId,
+        state,
+        quality,
+        totalMeters,
+        gpsMeters,
+        gapBridgeMeters,
+        pdrMeters,
+        pendingPdrMeters,
+        segmentId,
+        fixCount,
+        speedMps,
+        lastFixAt,
+        movingTime,
+        isStopped,
+        steps,
+        strideMeters,
+        stepsStatus,
+        failureState,
+        error,
+        stepsFinal,
+        journalPending,
+        journalFailed,
+        restoreState,
+        engineChanged,
+        distanceEligibleSteps,
+        activeTime,
+        bridgedGap,
+        uncreditedGap,
+        uncreditedGaps,
+        ambiguousSteps,
+      ]);
 }

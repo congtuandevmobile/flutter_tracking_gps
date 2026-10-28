@@ -337,6 +337,7 @@ class NativeSnapshot {
     required this.stepsStatus,
     required this.stepsFinal,
     required this.journalPending,
+    required this.journalFailed,
     required this.restoreState,
     required this.engineChanged,
     this.sessionId,
@@ -358,6 +359,11 @@ class NativeSnapshot {
   /// journal writer). Zero means everything shown here is durable; a crash while
   /// this is above zero can lose that many of the latest events.
   int journalPending;
+
+  /// A journal write or sync FAILED (or its barrier timed out). Sticky: once true,
+  /// what this snapshot shows is NOT guaranteed to survive a crash, whatever
+  /// [journalPending] says, and the recording must be treated as not durable.
+  bool journalFailed;
 
   /// True when the step total is final: after `stop`, the platform's exact count
   /// for the closed segment was obtained (or there is no step sensor). False

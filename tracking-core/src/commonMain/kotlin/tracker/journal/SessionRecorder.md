@@ -28,3 +28,7 @@ Not thread-safe: one serial context. Tested by `JournalTest` (`JournalReplayTest
 
 ## Finality (updated)
 `markFinalized(stepsFinal)` journals a `Finalized` record after `finish` (and any `correctClosedSegment`). `RestoreResult` adds `finished` and `stepsFinal`: a journal that ends at `Finish` restores as a finished, read-only session with the same finality; one cut between `Finish` and `Finalized` has provisional steps.
+
+## Recheck update
+
+`JournalSink.flush()` returns true only when durable. `tryStart` never throws and the engine starts BEFORE the header is written. Every tick is journaled. Pause/resume/finish are validated first: a refused one is NOT journaled and sets `lastFailure`. `markSegmentSettled` / `allStepsExact` give per-segment step finality. `lastAcceptedFixWallMs` is fixed at ingest. `restore` takes no clock, stops at the first impossible record (status CORRUPT) and pauses at the last journaled event time. No exception escapes (`guarded`).

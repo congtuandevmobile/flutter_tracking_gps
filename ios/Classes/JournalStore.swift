@@ -4,14 +4,15 @@ import TrackingCore
 
 /// A journal writer that can report a failed write and be closed.
 protocol DurableSink: JournalSink {
-    /// The first write failure, or nil. A failure never stops the recording; the engine shows it in the snapshot.
+    /// The FIRST write or sync failure, or nil. Sticky: never forgotten. A failure never stops the recording;
+    /// the engine shows it in the snapshot (`journalFailed`).
     var failure: Error? { get }
-    /// Lines accepted by `append` that are not DURABLE yet: queued, or written to the OS but not yet
-    /// synchronized to disk. Zero means everything appended survives even a power loss. (A process
-    /// crash alone loses only the queued ones: the OS keeps what was written.)
+    /// Lines accepted by `append` that are not DURABLE: queued, written but not yet synchronized, or LOST (a
+    /// write or sync failed). A lost line is never subtracted: it stays pending forever, so a failure can
+    /// never look like "everything is saved". Zero means everything appended survives even a power loss.
     var pending: Int { get }
-    /// Drains the queue and releases the file.
-    func close()
+    /// Drains the queue and releases the file. True when the writer is stopped.
+    @discardableResult func close() -> Bool
 }
 
 /// Where the session journals live. One file per session, named from a hash of the
@@ -23,12 +24,15 @@ protocol JournalStoring: AnyObject {
     func open(_ sessionId: String) -> DurableSink
     /// Every line of the journal, after the writer (if any) reached the disk.
     func read(_ sessionId: String) throws -> [String]
-    /// Atomically replaces the journal with `lines` (drops a damaged tail before appending again). With
-    /// `keepBackup` the original is first copied to `<name>.corrupt`: damage in the MIDDLE drops everything
-    /// after it, and that must never destroy the only copy.
+    /// Atomically replaces the journal with `lines`: the new content is written and synchronized next to it and
+    /// then swapped in (`replaceItemAt`), so a crash at any step leaves the old file or the new one, never
+    /// neither. With `keepBackup` the original is first copied to `<name>.corrupt`: damage in the MIDDLE drops
+    /// everything after it, and that must never destroy the only copy. Throws, original untouched, on failure.
     func rewrite(_ sessionId: String, lines: [String], keepBackup: Bool) throws
     /// Closes the writer, waits for it to drain, then deletes the journal.
     func clear(_ sessionId: String) throws
+    /// Closes the writer of a session that is over (a later `open` reopens it).
+    func release(_ sessionId: String)
     /// The ids of the sessions on this device, read from the journal headers.
     func list() throws -> [String]
 }
@@ -53,7 +57,7 @@ final class FileJournalStore: JournalStoring {
         lock.lock()
         let writer = writers[sessionId]
         lock.unlock()
-        writer?.flush()
+        _ = writer?.flush()
         let url = fileURL(sessionId)
         guard FileManager.default.fileExists(atPath: url.path) else { return [] }
         let text = try String(contentsOf: url, encoding: .utf8)
@@ -73,9 +77,40 @@ final class FileJournalStore: JournalStoring {
             try FileManager.default.copyItem(at: url, to: backup)
         }
         let temp = directory.appendingPathComponent(url.lastPathComponent + ".tmp")
-        try lines.map { $0 + "\n" }.joined().write(to: temp, atomically: false, encoding: .utf8)
-        if FileManager.default.fileExists(atPath: url.path) { try FileManager.default.removeItem(at: url) }
-        try FileManager.default.moveItem(at: temp, to: url)
+        if FileManager.default.fileExists(atPath: temp.path) { try FileManager.default.removeItem(at: temp) }
+        FileManager.default.createFile(atPath: temp.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: temp)
+        do {
+            try handle.write(contentsOf: Data(lines.map { $0 + "\n" }.joined().utf8))
+            try handle.synchronize()  // the new content is on disk BEFORE it replaces the old one
+            try handle.close()
+        } catch {
+            try? handle.close()
+            try? FileManager.default.removeItem(at: temp)
+            throw error
+        }
+        if FileManager.default.fileExists(atPath: url.path) {
+            // Atomic swap: no delete-then-move window in which neither file exists.
+            _ = try FileManager.default.replaceItemAt(url, withItemAt: temp)
+        } else {
+            try FileManager.default.moveItem(at: temp, to: url)
+        }
+        syncDirectory()
+    }
+
+    func release(_ sessionId: String) {
+        lock.lock()
+        let writer = writers.removeValue(forKey: sessionId)
+        lock.unlock()
+        writer?.close()
+    }
+
+    /// Best effort: commits the directory entry itself to disk.
+    private func syncDirectory() {
+        let fd = Darwin.open(directory.path, O_RDONLY)
+        guard fd >= 0 else { return }
+        _ = Darwin.fsync(fd)
+        Darwin.close(fd)
     }
 
     func clear(_ sessionId: String) throws {
@@ -150,7 +185,11 @@ final class FileJournalSink: DurableSink {
         let isClosed = closed
         stateLock.unlock()
         if isClosed {
+            // A line that cannot be written is pending (lost), never "saved".
             record(JournalError.closed)
+            stateLock.lock()
+            queued += 1
+            stateLock.unlock()
             return
         }
         stateLock.lock()
@@ -159,34 +198,44 @@ final class FileJournalSink: DurableSink {
         queue.async { [weak self] in self?.write(line) }
     }
 
-    func flush() {
+    /// The barrier: true only when everything queued is on disk AND nothing ever failed.
+    func flush() -> Bool {
         queue.sync { [weak self] in self?.sync() }
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return firstFailure == nil && queued == 0
     }
 
-    func close() {
+    @discardableResult
+    func close() -> Bool {
         stateLock.lock()
-        if closed {
-            stateLock.unlock()
-            return
-        }
+        let already = closed
         closed = true
         stateLock.unlock()
-        queue.sync { [weak self] in
-            guard let self = self else { return }
-            self.sync()
-            try? self.handle?.close()
-            self.handle = nil
+        if !already {
+            queue.sync { [weak self] in
+                guard let self = self else { return }
+                self.sync()
+                try? self.handle?.close()
+                self.handle = nil
+            }
         }
+        return true  // the serial queue drained: the writer is stopped
     }
 
     // MARK: - Private (queue)
 
     /// Synchronizes what was written to disk; only then is it durable and no longer "pending".
     private func sync() {
-        do { try handle?.synchronize() } catch { record(error) }
-        stateLock.lock()
-        queued -= unsynced
-        stateLock.unlock()
+        do {
+            try handle?.synchronize()
+            stateLock.lock()
+            queued -= unsynced
+            stateLock.unlock()
+        } catch {
+            // Not durable: those lines stay pending and the failure is sticky.
+            record(error)
+        }
         unsynced = 0
     }
 
@@ -218,10 +267,7 @@ final class FileJournalSink: DurableSink {
         } catch {
             // Recording goes on; the loss is visible in the snapshot.
             NSLog("[flutter_tracking_gps] journal write failed: %@", String(describing: error))
-            record(error)
-            stateLock.lock()
-            queued -= 1  // not retried: it is no longer pending, it is lost
-            stateLock.unlock()
+            record(error)  // the line stays PENDING forever: lost is never durable
         }
     }
 

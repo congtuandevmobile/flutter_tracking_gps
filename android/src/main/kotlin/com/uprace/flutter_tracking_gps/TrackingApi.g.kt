@@ -782,6 +782,12 @@ data class NativeSnapshot (
    */
   val journalPending: Long,
   /**
+   * A journal write or sync FAILED (or its barrier timed out). Sticky: once true,
+   * what this snapshot shows is NOT guaranteed to survive a crash, whatever
+   * [journalPending] says, and the recording must be treated as not durable.
+   */
+  val journalFailed: Boolean,
+  /**
    * True when the step total is final: after `stop`, the platform's exact count
    * for the closed segment was obtained (or there is no step sensor). False
    * means the total is the live count, which may still be corrected.
@@ -805,16 +811,17 @@ data class NativeSnapshot (
       val restoreState = pigeonVar_list[1] as NativeRestoreState
       val engineChanged = pigeonVar_list[2] as Boolean
       val journalPending = pigeonVar_list[3] as Long
-      val stepsFinal = pigeonVar_list[4] as Boolean
-      val sessionId = pigeonVar_list[5] as String?
-      val state = pigeonVar_list[6] as NativeTrackingState
-      val segmentId = pigeonVar_list[7] as Long
-      val distance = pigeonVar_list[8] as NativeDistance
-      val fixCount = pigeonVar_list[9] as Long
-      val lastFixTimeMs = pigeonVar_list[10] as Long?
-      val updatedAtMs = pigeonVar_list[11] as Long
-      val error = pigeonVar_list[12] as String?
-      return NativeSnapshot(stepsStatus, restoreState, engineChanged, journalPending, stepsFinal, sessionId, state, segmentId, distance, fixCount, lastFixTimeMs, updatedAtMs, error)
+      val journalFailed = pigeonVar_list[4] as Boolean
+      val stepsFinal = pigeonVar_list[5] as Boolean
+      val sessionId = pigeonVar_list[6] as String?
+      val state = pigeonVar_list[7] as NativeTrackingState
+      val segmentId = pigeonVar_list[8] as Long
+      val distance = pigeonVar_list[9] as NativeDistance
+      val fixCount = pigeonVar_list[10] as Long
+      val lastFixTimeMs = pigeonVar_list[11] as Long?
+      val updatedAtMs = pigeonVar_list[12] as Long
+      val error = pigeonVar_list[13] as String?
+      return NativeSnapshot(stepsStatus, restoreState, engineChanged, journalPending, journalFailed, stepsFinal, sessionId, state, segmentId, distance, fixCount, lastFixTimeMs, updatedAtMs, error)
     }
   }
   fun toList(): List<Any?> {
@@ -823,6 +830,7 @@ data class NativeSnapshot (
       restoreState,
       engineChanged,
       journalPending,
+      journalFailed,
       stepsFinal,
       sessionId,
       state,
@@ -842,7 +850,7 @@ data class NativeSnapshot (
       return true
     }
     val other = other as NativeSnapshot
-    return TrackingApiPigeonUtils.deepEquals(this.stepsStatus, other.stepsStatus) && TrackingApiPigeonUtils.deepEquals(this.restoreState, other.restoreState) && TrackingApiPigeonUtils.deepEquals(this.engineChanged, other.engineChanged) && TrackingApiPigeonUtils.deepEquals(this.journalPending, other.journalPending) && TrackingApiPigeonUtils.deepEquals(this.stepsFinal, other.stepsFinal) && TrackingApiPigeonUtils.deepEquals(this.sessionId, other.sessionId) && TrackingApiPigeonUtils.deepEquals(this.state, other.state) && TrackingApiPigeonUtils.deepEquals(this.segmentId, other.segmentId) && TrackingApiPigeonUtils.deepEquals(this.distance, other.distance) && TrackingApiPigeonUtils.deepEquals(this.fixCount, other.fixCount) && TrackingApiPigeonUtils.deepEquals(this.lastFixTimeMs, other.lastFixTimeMs) && TrackingApiPigeonUtils.deepEquals(this.updatedAtMs, other.updatedAtMs) && TrackingApiPigeonUtils.deepEquals(this.error, other.error)
+    return TrackingApiPigeonUtils.deepEquals(this.stepsStatus, other.stepsStatus) && TrackingApiPigeonUtils.deepEquals(this.restoreState, other.restoreState) && TrackingApiPigeonUtils.deepEquals(this.engineChanged, other.engineChanged) && TrackingApiPigeonUtils.deepEquals(this.journalPending, other.journalPending) && TrackingApiPigeonUtils.deepEquals(this.journalFailed, other.journalFailed) && TrackingApiPigeonUtils.deepEquals(this.stepsFinal, other.stepsFinal) && TrackingApiPigeonUtils.deepEquals(this.sessionId, other.sessionId) && TrackingApiPigeonUtils.deepEquals(this.state, other.state) && TrackingApiPigeonUtils.deepEquals(this.segmentId, other.segmentId) && TrackingApiPigeonUtils.deepEquals(this.distance, other.distance) && TrackingApiPigeonUtils.deepEquals(this.fixCount, other.fixCount) && TrackingApiPigeonUtils.deepEquals(this.lastFixTimeMs, other.lastFixTimeMs) && TrackingApiPigeonUtils.deepEquals(this.updatedAtMs, other.updatedAtMs) && TrackingApiPigeonUtils.deepEquals(this.error, other.error)
   }
 
   override fun hashCode(): Int {
@@ -851,6 +859,7 @@ data class NativeSnapshot (
     result = 31 * result + TrackingApiPigeonUtils.deepHash(this.restoreState)
     result = 31 * result + TrackingApiPigeonUtils.deepHash(this.engineChanged)
     result = 31 * result + TrackingApiPigeonUtils.deepHash(this.journalPending)
+    result = 31 * result + TrackingApiPigeonUtils.deepHash(this.journalFailed)
     result = 31 * result + TrackingApiPigeonUtils.deepHash(this.stepsFinal)
     result = 31 * result + TrackingApiPigeonUtils.deepHash(this.sessionId)
     result = 31 * result + TrackingApiPigeonUtils.deepHash(this.state)

@@ -96,4 +96,11 @@ sealed class JournalRecord {
      * its steps are provisional.
      */
     data class Finalized(val stepsFinal: Boolean) : JournalRecord()
+
+    /**
+     * The platform's exact step count for the CLOSED segment [segmentId] was obtained ([exact] true) or
+     * could not be ([exact] false). A session's steps are exact only when EVERY segment in which the
+     * step sensor was active is settled exact; one failed or lost close keeps it provisional.
+     */
+    data class SegmentSettled(val segmentId: Int, val exact: Boolean) : JournalRecord()
 }

@@ -18,7 +18,7 @@ private class MemSink : JournalSink {
     val lines = ArrayList<String>()
     var flushes = 0
     override fun append(line: String) { lines.add(line) }
-    override fun flush() { flushes++ }
+    override fun flush(): Boolean { flushes++; return true }
 }
 
 private fun settings(adaptive: Boolean = false) = BridgeSettings(

@@ -12,8 +12,8 @@ enum PresenterEvent { start, update, pause, resume, finish }
 /// hurt the recording:
 ///
 ///  * lifecycle events (start, pause, resume, finish) are delivered in order and
-///    never dropped (the queue is capped; on overflow the oldest are discarded
-///    and reported);
+///    kept (the queue is capped: on overflow the OLDEST are discarded and
+///    reported, so "never dropped" holds only below the cap);
 ///  * `update` events are COALESCED: only the newest waits, so a slow presenter
 ///    never builds a backlog, and a pending update is discarded once `finish`
 ///    is queued;
@@ -75,20 +75,26 @@ class PresenterDispatcher {
   /// [maxWait]; then stops accepting events.
   Future<void> close({Duration? maxWait}) async {
     final limit = maxWait ?? callTimeout * 2;
-    if (_pumping) {
+    if (_pumping || _stuck != null) {
       final idle = _idle ??= Completer<void>();
       await idle.future.timeout(limit, onTimeout: () {});
     }
+    // Closed means closed: nothing queued may be delivered later, not even when a
+    // call that was hung at this moment finally completes.
     _closed = true;
+    _lifecycle.clear();
+    _pendingUpdate = null;
   }
 
   void _pump() {
-    if (_pumping || _stuck != null) return;
+    if (_closed || _pumping || _stuck != null) return;
     _pumping = true;
     unawaited(() async {
       while (true) {
         final (PresenterEvent, TrackingSnapshot)? next;
-        if (_lifecycle.isNotEmpty) {
+        if (_closed) {
+          break;
+        } else if (_lifecycle.isNotEmpty) {
           next = _lifecycle.removeFirst();
         } else if (_pendingUpdate != null) {
           next = (PresenterEvent.update, _pendingUpdate!);
@@ -158,7 +164,7 @@ class PresenterDispatcher {
     unawaited(
       stuck.whenComplete(() {
         _stuck = null;
-        _pump();
+        if (!_closed) _pump();
       }),
     );
     return true;

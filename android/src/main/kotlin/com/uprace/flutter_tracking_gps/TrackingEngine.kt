@@ -118,6 +118,7 @@ internal class TrackingEngine(
             stepsStatus = stepsStatus,
             stepsFinal = state == NativeTrackingState.STOPPED && (restoredStepsFinal ?: true),
             journalPending = (sink?.pending ?: 0).toLong(),
+            journalFailed = failure != null,
             restoreState = restoreState,
             engineChanged = engineChanged,
             state = state,
@@ -212,7 +213,16 @@ internal class TrackingEngine(
                 }
             }
             publish()
-            withContext(Dispatchers.IO) { recorder?.flush() }
+            // Whether it is durable is read from the sink (`journalFailed`/`journalPending`), never assumed.
+            withContext(Dispatchers.IO) {
+                recorder?.flush()
+                // The session is over: free the writer thread and the file handle (a later open reopens it).
+                try {
+                    store.release(id)
+                } catch (e: IOException) {
+                    Log.e(LOG_TAG, "cannot release the journal writer", e)
+                }
+            }
             synchronized(coreLock) { state = NativeTrackingState.STOPPED }
             publish()
         }
@@ -312,18 +322,22 @@ internal class TrackingEngine(
     /** Deletes the journal; the writer is closed and drained first, so nothing re-creates the file. */
     @Throws(IOException::class)
     suspend fun clearSession(id: String) = withContext(Dispatchers.IO) {
-        if (id == sessionId) {
-            commands.withLock {
+        // Under the command lock the whole time: a start/restore of this session cannot interleave with the delete.
+        commands.withLock {
+            if (id == sessionId) {
                 if (state == NativeTrackingState.RUNNING || state == NativeTrackingState.PAUSED ||
                     state == NativeTrackingState.FINISHING
                 ) {
                     throw IOException("session $id is still open: finish it first")
                 }
+            }
+            // Throws (keeping the file) when the writer did not stop; the engine's references are dropped only after.
+            store.clear(id)
+            if (id == sessionId) {
                 recorder = null
                 sink = null
             }
         }
-        store.clear(id)
     }
 
     @Throws(IOException::class)
@@ -510,8 +524,6 @@ internal class TrackingEngine(
 
     private fun distance(): NativeDistance {
         val s: BridgeSnapshot = synchronized(coreLock) { recorder?.snapshot() } ?: return emptyDistance()
-        val wallNow = wallClockMs()
-        val monoNow = monotonicMs()
         return NativeDistance(
             quality = qualityOf(s.quality),
             totalMeters = s.totalMeters,
@@ -523,7 +535,9 @@ internal class TrackingEngine(
             isStopped = s.isStopped,
             speedMps = s.speedMps,
             // The core measures on the monotonic clock; the app wants a calendar time.
-            lastAcceptedFixAtMs = if (s.lastFixAtMs >= 0) wallNow - (monoNow - s.lastFixAtMs) else -1,
+            // The calendar time was fixed when the fix was accepted; never recomputed from "now" (a clock change or
+            // a long pause would shift it).
+            lastAcceptedFixAtMs = synchronized(coreLock) { recorder?.lastAcceptedFixWallMs() } ?: -1,
             steps = s.steps,
             strideMeters = s.strideMeters,
             activeTimeMs = s.activeTimeMs,

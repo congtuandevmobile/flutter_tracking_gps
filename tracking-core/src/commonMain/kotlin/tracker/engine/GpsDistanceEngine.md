@@ -87,3 +87,7 @@ Uses `DistanceLedger`, `TrackingLog`, `Kalman2D`, `OutlierRejector`, `GapReconci
 - **Stationary:** Doppler below the limit; no usable Doppler falls back to the displacement speed; a fix inside the stay radius while `StopDetector` says stopped is jitter (the anchor stays put, so leaving the radius credits the whole displacement).
 
 `distanceEligibleSteps` counts the steps that taught the stride or became a pending estimate (the ambiguous and the too-late ones do not). A long gap with a working sensor and no step event is not credited and is reported as uncredited: absence of evidence, not proof of standing still.
+
+## Recheck update
+
+`openWeakStartMs` identifies the open weak interval: a weak step batch attaches only if it started inside it. `stepsInGap` resets when a gap ends. The unmeasured interval before the first good fix is counted once as uncredited. Moving time is added only when the verdict is not STATIONARY. `distanceEligibleSteps` counts steps usable for distance.

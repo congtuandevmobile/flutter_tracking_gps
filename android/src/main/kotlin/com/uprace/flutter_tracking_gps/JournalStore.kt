@@ -1,6 +1,16 @@
 package com.uprace.flutter_tracking_gps
 
 import android.util.Log
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import tracker.journal.JournalCodec
 import tracker.journal.JournalRecord
 import tracker.journal.JournalSink
@@ -10,36 +20,33 @@ import java.io.IOException
 import java.io.OutputStreamWriter
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.LinkedBlockingQueue
-import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
-/** A [JournalSink] that can report that a write failed and be closed. */
+/** A [JournalSink] that can report a failed write, count what is not durable, and be closed. */
 internal interface DurableSink : JournalSink {
-    /** The first write failure, or null. A failure never stops the recording; the engine shows it in the snapshot. */
+    /** The FIRST write, sync or barrier failure, or null. Sticky: a failure is never forgotten. */
     val failure: Throwable?
 
     /**
-     * Lines accepted by [append] that are not DURABLE yet: queued, or written to the OS but not yet
-     * `fsync`ed. Zero means everything appended survives even a power loss. (A process crash alone
-     * loses only the queued ones: the OS keeps what was written.)
+     * Lines accepted by [append] that are not DURABLE: queued, written but not yet `fsync`ed, or LOST (a write or
+     * sync failed). A lost line is never subtracted: it stays pending forever, so a failure can never look like
+     * "everything is saved". Zero means everything appended survives even a power loss.
      */
     val pending: Int
 
-    /** Drains the queue and releases the file. */
-    fun close()
+    /** Drains the queue and releases the file. True only when the writer really stopped within the time limit. */
+    fun close(): Boolean
 }
 
 /**
- * Where the session journals live. One file per session, named from a hash of the
- * session id (two ids can never collide, whatever characters they hold; the real
- * id is inside the header). The files hold coordinates: they live in app-private
- * storage and are deleted by [clear].
+ * Where the session journals live (`doc/JOURNAL.md`). One file per session in app-private storage, named from a
+ * SHA-256 hash of the session id (two ids never collide; the real id is in the header). The files hold
+ * coordinates and are deleted by [clear].
  *
- * [read], [rewrite], [clear] and [list] block on I/O: call them from `Dispatchers.IO`.
+ * [read], [rewrite], [clear], [release] and [list] block on I/O: call them from `Dispatchers.IO`.
  */
 internal interface JournalStore {
-    /** The append-only writer of [sessionId]: ONE writer per session, shared by every caller. */
+    /** The append-only writer of [sessionId]: ONE shared writer per session. */
     fun open(sessionId: String): DurableSink
 
     /** Every line of the journal, after the writer (if any) reached the disk. Empty when there is none. */
@@ -47,16 +54,22 @@ internal interface JournalStore {
     fun read(sessionId: String): List<String>
 
     /**
-     * Atomically replaces the journal with [lines] (used to drop a damaged tail before appending
-     * again). With [keepBackup] the original is first copied to `<name>.corrupt`, because a damaged
-     * MIDDLE line means everything after it is dropped, and that must never destroy the only copy.
+     * Atomically replaces the journal with [lines]: the new content is written and synced next to it and then
+     * renamed over it, so a crash at any step leaves either the old file or the new one, never neither. With
+     * [keepBackup] the original is also copied to `<name>.corrupt` first (damage in the MIDDLE of a file drops
+     * everything after it, and that must never destroy the only copy). Throws, leaving the original untouched,
+     * when the writer cannot be stopped or the replace fails.
      */
     @Throws(IOException::class)
     fun rewrite(sessionId: String, lines: List<String>, keepBackup: Boolean = false)
 
-    /** Closes the writer, waits for it to drain, then deletes the journal: nothing can re-create the file. */
+    /** Closes the writer, WAITS for it to stop, then deletes the journal. Throws without deleting when it did not stop. */
     @Throws(IOException::class)
     fun clear(sessionId: String)
+
+    /** Closes the writer of a session that is over (it holds a thread and a file handle). A later `open` reopens it. */
+    @Throws(IOException::class)
+    fun release(sessionId: String)
 
     /** The ids of the sessions on this device, read from the journal headers. */
     @Throws(IOException::class)
@@ -82,24 +95,35 @@ internal class FileJournalStore(private val directory: File) : JournalStore {
     @Synchronized
     @Throws(IOException::class)
     override fun rewrite(sessionId: String, lines: List<String>, keepBackup: Boolean) {
-        writers.remove(sessionId)?.close()
+        stopWriter(sessionId)
         val file = fileFor(sessionId)
         ensureDirectory()
         if (keepBackup && file.exists()) file.copyTo(File(directory, file.name + ".corrupt"), overwrite = true)
         val temp = File(directory, file.name + ".tmp")
-        temp.writeText(lines.joinToString("") { it + "\n" }, Charsets.UTF_8)
-        if (!temp.renameTo(file)) {
-            file.delete()
-            if (!temp.renameTo(file)) throw IOException("cannot replace ${file.name}")
+        FileOutputStream(temp).use { out ->
+            out.write(lines.joinToString("") { it + "\n" }.toByteArray(StandardCharsets.UTF_8))
+            out.fd.sync() // the new content is on disk BEFORE it replaces the old one
         }
+        // rename(2) over an existing file is atomic on POSIX: no delete-then-rename window.
+        if (!temp.renameTo(file)) {
+            temp.delete()
+            throw IOException("cannot replace ${file.name}; the original is untouched")
+        }
+        syncDirectory()
     }
 
     @Synchronized
     @Throws(IOException::class)
     override fun clear(sessionId: String) {
-        writers.remove(sessionId)?.close()
+        stopWriter(sessionId)
         val file = fileFor(sessionId)
         if (file.exists() && !file.delete()) throw IOException("cannot delete ${file.name}")
+    }
+
+    @Synchronized
+    @Throws(IOException::class)
+    override fun release(sessionId: String) {
+        stopWriter(sessionId)
     }
 
     @Synchronized
@@ -115,8 +139,29 @@ internal class FileJournalStore(private val directory: File) : JournalStore {
         return ids
     }
 
+    /** Stops the writer and CONFIRMS it stopped; a writer that did not stop must not be raced by a delete or a replace. */
+    private fun stopWriter(sessionId: String) {
+        val writer = writers[sessionId] ?: return
+        if (!writer.close()) throw IOException("the journal writer of this session did not stop in time; nothing was changed")
+        writers.remove(sessionId)
+    }
+
     private fun ensureDirectory() {
         if (!directory.exists() && !directory.mkdirs() && !directory.exists()) throw IOException("cannot create ${directory.path}")
+    }
+
+    /** Best effort: commits the rename itself to disk (the directory entry). Not available on every platform. */
+    private fun syncDirectory() {
+        try {
+            val fd = android.system.Os.open(directory.path, android.system.OsConstants.O_RDONLY, 0)
+            try {
+                android.system.Os.fsync(fd)
+            } finally {
+                android.system.Os.close(fd)
+            }
+        } catch (_: Throwable) {
+            // Not fatal: the rename is still atomic; only the power-loss window of the directory entry stays open.
+        }
     }
 
     private fun fileFor(sessionId: String): File {
@@ -131,81 +176,92 @@ internal class FileJournalStore(private val directory: File) : JournalStore {
 }
 
 /**
- * The single writer of one journal: [append] only queues (never blocks the
- * caller), one thread writes in order, and [flush] is the barrier that returns
- * once everything queued is on disk. Nothing else ever touches the file.
+ * The single writer of one journal, as a coroutine confined to ONE thread (`Dispatchers.IO.limitedParallelism(1)`):
+ * [append] only queues (never blocks the caller), the writer writes in order, and [flush] is the barrier that
+ * returns `true` only when everything queued is on disk AND nothing ever failed. Nothing else touches the file.
  */
+@OptIn(ExperimentalCoroutinesApi::class)
 internal class FileJournalSink(private val file: File) : DurableSink {
     private sealed interface Op {
         class Line(val text: String) : Op
-        class Barrier(val done: CountDownLatch) : Op
+        class Barrier(val done: CompletableDeferred<Unit>) : Op
         object Close : Op
     }
 
-    private val queue = LinkedBlockingQueue<Op>()
-    private val queued = java.util.concurrent.atomic.AtomicInteger(0)
-
-    override val pending: Int get() = queued.get()
+    private val ops = Channel<Op>(Channel.UNLIMITED)
+    private val queued = AtomicInteger(0)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO.limitedParallelism(1))
 
     @Volatile override var failure: Throwable? = null
         private set
 
     @Volatile private var closed = false
-    private val thread = Thread({ run() }, "tracking-journal").apply { isDaemon = true; start() }
+
+    override val pending: Int get() = queued.get()
+
+    private val writerJob: Job = scope.launch { run() }
 
     override fun append(line: String) {
         if (closed) {
-            failure = failure ?: IOException("journal is closed")
+            fail(IOException("journal is closed"))
+            queued.incrementAndGet() // a line that cannot be written is pending (lost), never "saved"
             return
         }
         queued.incrementAndGet()
-        queue.offer(Op.Line(line))
+        ops.trySend(Op.Line(line))
     }
 
-    override fun flush() {
-        if (closed || !thread.isAlive) return
-        val done = CountDownLatch(1)
-        queue.offer(Op.Barrier(done))
-        if (!done.await(FLUSH_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
-            failure = failure ?: IOException("journal flush timed out")
+    override fun flush(): Boolean {
+        if (closed) return failure == null && queued.get() == 0
+        val done = CompletableDeferred<Unit>()
+        ops.trySend(Op.Barrier(done))
+        val reached = runBlocking { withTimeoutOrNull(BARRIER_TIMEOUT_MS) { done.await() } }
+        if (reached == null) fail(IOException("journal flush timed out"))
+        return reached != null && failure == null && queued.get() == 0
+    }
+
+    override fun close(): Boolean {
+        if (!closed) {
+            closed = true
+            ops.trySend(Op.Close)
         }
+        val stopped = runBlocking { withTimeoutOrNull(BARRIER_TIMEOUT_MS) { writerJob.join() } != null }
+        if (!stopped) fail(IOException("journal writer did not stop in time"))
+        return stopped
     }
 
-    override fun close() {
-        if (closed) return
-        closed = true
-        val done = CountDownLatch(1)
-        queue.offer(Op.Barrier(done))
-        queue.offer(Op.Close)
-        done.await(FLUSH_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+    private fun fail(e: Throwable) {
+        if (failure == null) failure = e
     }
 
-    private fun run() {
+    private suspend fun run() {
         var out: FileOutputStream? = null
         var writer: OutputStreamWriter? = null
         var unsynced = 0
         var lastSyncMs = System.currentTimeMillis()
 
-        // fsync what was written; only then is it durable and no longer "pending".
+        // fsync what was written; only then is it durable and no longer pending. A sync that FAILS leaves
+        // those lines pending: they are not durable and the failure is sticky.
         fun sync() {
             try {
                 writer?.flush()
                 out?.fd?.sync()
+                queued.addAndGet(-unsynced)
             } catch (e: IOException) {
-                failure = failure ?: e
+                fail(e)
             }
-            queued.addAndGet(-unsynced)
             unsynced = 0
             lastSyncMs = System.currentTimeMillis()
         }
 
         try {
             while (true) {
-                val op = queue.poll(IDLE_POLL_MS, TimeUnit.MILLISECONDS)
-                if (op == null) {
+                val received = withTimeoutOrNull(IDLE_POLL_MS) { ops.receiveCatching() }
+                if (received == null) {
                     if (unsynced > 0 && System.currentTimeMillis() - lastSyncMs >= SYNC_INTERVAL_MS) sync()
                     continue
                 }
+                val op = received.getOrNull() ?: break
                 when (op) {
                     is Op.Line -> {
                         try {
@@ -222,18 +278,20 @@ internal class FileJournalSink(private val file: File) : DurableSink {
                             writer.flush()
                             unsynced++
                         } catch (e: IOException) {
-                            // Recording goes on; the loss is visible in the snapshot.
+                            // Recording goes on; the loss is visible: the line stays PENDING forever and the failure is sticky.
                             Log.e(LOG_TAG, "journal write failed", e)
-                            failure = failure ?: e
-                            queued.decrementAndGet() // not retried: it is no longer pending, it is lost
+                            fail(e)
                         }
                         if (unsynced > 0 && System.currentTimeMillis() - lastSyncMs >= SYNC_INTERVAL_MS) sync()
                     }
                     is Op.Barrier -> {
                         sync()
-                        op.done.countDown()
+                        op.done.complete(Unit)
                     }
-                    Op.Close -> return
+                    Op.Close -> {
+                        sync()
+                        break
+                    }
                 }
             }
         } finally {
@@ -246,7 +304,7 @@ internal class FileJournalSink(private val file: File) : DurableSink {
 
     private companion object {
         const val LOG_TAG = "FlutterTrackingGps"
-        const val FLUSH_TIMEOUT_SECONDS = 10L
+        const val BARRIER_TIMEOUT_MS = 10_000L
         const val SYNC_INTERVAL_MS = 1_000L
         const val IDLE_POLL_MS = 200L
     }

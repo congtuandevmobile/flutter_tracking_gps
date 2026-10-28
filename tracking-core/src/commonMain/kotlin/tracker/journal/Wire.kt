@@ -4,12 +4,12 @@ package tracker.journal
 internal object Wire {
     private const val HEX = "0123456789ABCDEF"
 
-    /** Escapes the characters that would break a `|`-separated line: `%`, `|`, `=`, CR, LF. */
+    /** Escapes every character the format uses as a separator or terminator: `%`, `|`, `=`, `,`, CR, LF. */
     fun escape(s: String): String {
         val b = StringBuilder(s.length + 8)
         for (c in s) {
             when (c) {
-                '%', '|', '=', '\n', '\r' -> {
+                '%', '|', '=', ',', '\n', '\r' -> {
                     b.append('%')
                     b.append(HEX[(c.code shr 4) and 0xF])
                     b.append(HEX[c.code and 0xF])

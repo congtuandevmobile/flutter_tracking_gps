@@ -229,8 +229,13 @@ class FlutterTrackingGpsPlugin :
                 engine.markPermissionDenied()
                 return@command engine.snapshot()
             }
-            startService(context, config.notificationTitle, config.notificationText)
-            engine.start(config)
+            startForegroundAndWait(context, config.notificationTitle, config.notificationText)
+            try {
+                engine.start(config)
+            } catch (e: Throwable) {
+                stopService(context) // no orphan service when the session did not start
+                throw e
+            }
         }
     }
 
@@ -246,13 +251,19 @@ class FlutterTrackingGpsPlugin :
             // location, tick and steps start. If the OS refuses (for example a start from the
             // background), recording does NOT continue: the session stays paused and the
             // caller gets FOREGROUND_START_FAILED.
-            val extras = engine.sessionExtras()
-            try {
-                startService(context, extras["title"] ?: DEFAULT_TITLE, extras["text"] ?: DEFAULT_TEXT)
-            } catch (e: RuntimeException) {
-                throw e.toFlutterError(TrackingErrorCode.FOREGROUND_START_FAILED, "could not start the foreground service; recording stays paused")
+            val current = engine.snapshot()
+            // Validate BEFORE any side effect: a wrong id or state must not start (and orphan) a service.
+            if (current.sessionId != sessionId || current.state != NativeTrackingState.PAUSED) {
+                return@command engine.resume(sessionId)
             }
-            engine.resume(sessionId)
+            val extras = engine.sessionExtras()
+            startForegroundAndWait(context, extras["title"] ?: DEFAULT_TITLE, extras["text"] ?: DEFAULT_TEXT)
+            try {
+                engine.resume(sessionId)
+            } catch (e: Throwable) {
+                stopService(context)
+                throw e
+            }
         }
     }
 
@@ -274,6 +285,7 @@ class FlutterTrackingGpsPlugin :
             stepsStatus = NativeStepsStatus.OFF,
             stepsFinal = false,
             journalPending = 0,
+            journalFailed = false,
             restoreState = NativeRestoreState.NOT_RESTORED,
             engineChanged = false,
         )
@@ -345,6 +357,8 @@ class FlutterTrackingGpsPlugin :
                 callback(Result.success(block(context, TrackingRuntime.engine(context))))
             } catch (e: CancellationException) {
                 throw e
+            } catch (e: FlutterError) {
+                callback(Result.failure(e)) // already carries its own stable code
             } catch (e: Exception) {
                 callback(Result.failure(e.toFlutterError(code, message)))
             }
@@ -357,6 +371,25 @@ class FlutterTrackingGpsPlugin :
             .putExtra(TrackingService.EXTRA_TITLE, title)
             .putExtra(TrackingService.EXTRA_TEXT, text)
         ContextCompat.startForegroundService(context, intent)
+    }
+
+    /** Starts the service and returns only after it reached `startForeground`; otherwise stops it and throws. */
+    private suspend fun startForegroundAndWait(context: Context, title: String, text: String) {
+        val wait = TrackingService.handshake.expect()
+        val ready = try {
+            startService(context, title, text)
+            TrackingService.handshake.await(wait, FOREGROUND_READY_TIMEOUT_MS)
+        } catch (e: CancellationException) {
+            stopService(context)
+            throw e
+        } catch (e: Exception) {
+            stopService(context)
+            throw e.toFlutterError(TrackingErrorCode.FOREGROUND_START_FAILED, "could not start the foreground service; recording did not start")
+        }
+        if (!ready) {
+            stopService(context)
+            throw flutterError(TrackingErrorCode.FOREGROUND_START_FAILED, "the foreground service did not start in time; recording did not start")
+        }
     }
 
     private fun stopService(context: Context) {
@@ -424,6 +457,7 @@ class FlutterTrackingGpsPlugin :
     private companion object {
         const val REQUEST_CODE = 7421
         const val STEPS_REQUEST_CODE = 7422
+        const val FOREGROUND_READY_TIMEOUT_MS = 5_000L
         const val DEFAULT_TITLE = "Recording"
         const val DEFAULT_TEXT = "Tracking your activity. Tap to return to the app."
     }

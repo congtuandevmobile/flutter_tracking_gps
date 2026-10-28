@@ -14,3 +14,7 @@ Encodes a `JournalRecord` as one line `CRC32|TYPE|field|...` and decodes it back
 Never guesses at a damaged line. Format and policy: `doc/JOURNAL.md`. Tested by `JournalTest` (`JournalCodecTest`).
 
 `ENGINE_VERSION` (rules) is separate from `VERSION` (format); the header stores both.
+
+## Recheck update
+
+`VERSION = 2`, `MIN_VERSION = 1` (v1 journals still read), `ENGINE_VERSION = 2`. Codes `Y` (SegmentSettled) and `Z` (Finalized). A version outside `MIN_VERSION..VERSION` is refused.

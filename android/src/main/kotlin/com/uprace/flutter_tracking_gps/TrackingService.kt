@@ -57,8 +57,14 @@ class TrackingService : Service() {
         }
         title = intent?.getStringExtra(EXTRA_TITLE) ?: DEFAULT_TITLE
         text = intent?.getStringExtra(EXTRA_TEXT) ?: DEFAULT_TEXT
-        // Must run within seconds of startForegroundService().
-        startForegroundCompat(buildNotification(title, text))
+        // Must run within seconds of startForegroundService(). The plugin waits for the acknowledgement.
+        try {
+            startForegroundCompat(buildNotification(title, text))
+            handshake.acknowledge()
+        } catch (e: RuntimeException) {
+            handshake.fail(e)
+            stopSelf()
+        }
         // Not sticky: after a process kill there is no session to continue, and
         // a restarted service without one would only show a stale notification.
         return START_NOT_STICKY
@@ -106,6 +112,9 @@ class TrackingService : Service() {
 
     companion object {
         @Volatile private var instance: TrackingService? = null
+
+        /** Signals that the service is in the foreground (see [ForegroundHandshake]). */
+        internal val handshake = ForegroundHandshake()
 
         /** Changes the text of the running notification; a no-op when no session records. */
         fun update(title: String, text: String) {

@@ -29,3 +29,7 @@ Tested by `RunnerTests` with fake provider, steps and in-memory store.
 `stop` goes through `.finishing` (exact steps requested, journal being flushed) and only then `.stopped`; a second `stop` meanwhile returns the current snapshot. The snapshot carries `journalPending`. Restore keeps `<file>.corrupt` before repairing damage in the middle, and reports `ENGINE_CHANGED` when the journal's engine version differs. A session that is `.finishing` cannot be cleared.
 
 A journal that ended at `Finish` restores as `.stopped` (read-only, with the finality the journal says), never `.paused`. `stop` settles the step total IN the journal (`markFinalized`) before the flush, so a restore reports the same finality; a second answer to the exact-count query (a late one after a timeout) is ignored (`settled`), so a published final result is never rewritten. The snapshot carries `restoreState`, `engineChanged` and `distanceEligibleSteps`.
+
+## Recheck update
+
+Each finish is a `FinishOperation` bound to the session token: a second `stop` joins it; a start/restore replaces it and the old stop fails with `SUPERSEDED`; the token is re-checked after the journal flush. Step closes are counted per session (an old answer never touches the new counts) and journaled per segment (`markSegmentSettled`); finality is `allStepsExact()`. Step callbacks use the injected clocks; a location error outside `running` is ignored; `requestPermission` waiters are released after 120 s with the current status. Snapshot carries `journalFailed`.

@@ -681,6 +681,7 @@ class NativeSnapshot {
     required this.restoreState,
     required this.engineChanged,
     required this.journalPending,
+    required this.journalFailed,
     required this.stepsFinal,
     this.sessionId,
     required this.state,
@@ -706,6 +707,11 @@ class NativeSnapshot {
   /// journal writer). Zero means everything shown here is durable; a crash while
   /// this is above zero can lose that many of the latest events.
   int journalPending;
+
+  /// A journal write or sync FAILED (or its barrier timed out). Sticky: once true,
+  /// what this snapshot shows is NOT guaranteed to survive a crash, whatever
+  /// [journalPending] says, and the recording must be treated as not durable.
+  bool journalFailed;
 
   /// True when the step total is final: after `stop`, the platform's exact count
   /// for the closed segment was obtained (or there is no step sensor). False
@@ -736,6 +742,7 @@ class NativeSnapshot {
       restoreState,
       engineChanged,
       journalPending,
+      journalFailed,
       stepsFinal,
       sessionId,
       state,
@@ -758,15 +765,16 @@ class NativeSnapshot {
       restoreState: result[1]! as NativeRestoreState,
       engineChanged: result[2]! as bool,
       journalPending: result[3]! as int,
-      stepsFinal: result[4]! as bool,
-      sessionId: result[5] as String?,
-      state: result[6]! as NativeTrackingState,
-      segmentId: result[7]! as int,
-      distance: result[8]! as NativeDistance,
-      fixCount: result[9]! as int,
-      lastFixTimeMs: result[10] as int?,
-      updatedAtMs: result[11]! as int,
-      error: result[12] as String?,
+      journalFailed: result[4]! as bool,
+      stepsFinal: result[5]! as bool,
+      sessionId: result[6] as String?,
+      state: result[7]! as NativeTrackingState,
+      segmentId: result[8]! as int,
+      distance: result[9]! as NativeDistance,
+      fixCount: result[10]! as int,
+      lastFixTimeMs: result[11] as int?,
+      updatedAtMs: result[12]! as int,
+      error: result[13] as String?,
     );
   }
 
@@ -779,7 +787,7 @@ class NativeSnapshot {
     if (identical(this, other)) {
       return true;
     }
-    return _deepEquals(stepsStatus, other.stepsStatus) && _deepEquals(restoreState, other.restoreState) && _deepEquals(engineChanged, other.engineChanged) && _deepEquals(journalPending, other.journalPending) && _deepEquals(stepsFinal, other.stepsFinal) && _deepEquals(sessionId, other.sessionId) && _deepEquals(state, other.state) && _deepEquals(segmentId, other.segmentId) && _deepEquals(distance, other.distance) && _deepEquals(fixCount, other.fixCount) && _deepEquals(lastFixTimeMs, other.lastFixTimeMs) && _deepEquals(updatedAtMs, other.updatedAtMs) && _deepEquals(error, other.error);
+    return _deepEquals(stepsStatus, other.stepsStatus) && _deepEquals(restoreState, other.restoreState) && _deepEquals(engineChanged, other.engineChanged) && _deepEquals(journalPending, other.journalPending) && _deepEquals(journalFailed, other.journalFailed) && _deepEquals(stepsFinal, other.stepsFinal) && _deepEquals(sessionId, other.sessionId) && _deepEquals(state, other.state) && _deepEquals(segmentId, other.segmentId) && _deepEquals(distance, other.distance) && _deepEquals(fixCount, other.fixCount) && _deepEquals(lastFixTimeMs, other.lastFixTimeMs) && _deepEquals(updatedAtMs, other.updatedAtMs) && _deepEquals(error, other.error);
   }
 
   @override

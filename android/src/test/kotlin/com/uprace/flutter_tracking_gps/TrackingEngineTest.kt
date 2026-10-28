@@ -81,21 +81,25 @@ private class MemoryJournalStore : JournalStore {
     inner class MemorySink(private val id: String) : DurableSink {
         override var failure: Throwable? = null
         private val queue = ArrayList<String>()
-        override val pending: Int get() = queue.size
+        private var lost = 0
+        /** Queued AND lost lines: a lost line is never durable, so it stays pending (as the real writer does). */
+        override val pending: Int get() = queue.size + lost
         override fun append(line: String) {
             if (failOnAppend) {
                 failure = failure ?: IOException("disk full")
+                lost++
                 return
             }
             if (autoWrite) files.getOrPut(id) { ArrayList() }.add(line) else queue.add(line)
         }
-        override fun flush() {
+        override fun flush(): Boolean {
             flushes++
             files.getOrPut(id) { ArrayList() }.addAll(queue)
             queue.clear()
             onFlush?.invoke()
+            return failure == null && lost == 0
         }
-        override fun close() {}
+        override fun close(): Boolean = true
     }
 
     override fun open(sessionId: String): DurableSink = sinks.getOrPut(sessionId) { MemorySink(sessionId) }
@@ -106,6 +110,7 @@ private class MemoryJournalStore : JournalStore {
         files[sessionId] = lines.toMutableList()
     }
     override fun clear(sessionId: String) { files.remove(sessionId); sinks.remove(sessionId) }
+    override fun release(sessionId: String) {}
     override fun list(): List<String> = files.values.mapNotNull { (it.firstOrNull()?.let(JournalCodec::decode) as? JournalRecord.Header)?.sessionId }
 }
 
@@ -580,5 +585,40 @@ class TrackingEngineTest {
         val header = JournalCodec.decode(store.files.getValue("s")[0]) as JournalRecord.Header
         store.files.getValue("s")[0] = JournalCodec.encode(header.copy(engineVersion = JournalCodec.ENGINE_VERSION + 1))
         assertTrue(engine(FakeSource(), store).restore(startConfig()).engineChanged)
+    }
+}
+
+@OptIn(ExperimentalCoroutinesApi::class)
+class AuditNativeProbeTest {
+    @Test fun wallClockChangeMustNotMoveTheTimestampOfAnExistingFix() = runTest {
+        val source = FakeSource()
+        var wall = BASE
+        val engine = TrackingEngine(source, MemoryJournalStore(),
+            CoroutineScope(backgroundScope.coroutineContext + UnconfinedTestDispatcher(testScheduler)),
+            wallClockMs = { wall }, monotonicMs = { MONO })
+        engine.start(startConfig())
+        source.push(loc(0.0,0.0))
+        assertEquals(BASE,engine.snapshot().distance.lastAcceptedFixAtMs)
+        wall += 3600000L
+        assertEquals(BASE,engine.snapshot().distance.lastAcceptedFixAtMs,"same measurement must retain its epoch")
+    }
+    @Test fun failedJournalMustNotBeReportedAsStoppedWithNoPendingData() = runTest {
+        val source=FakeSource();val store=MemoryJournalStore();store.failOnAppend=true
+        val engine=TrackingEngine(source,store,
+            CoroutineScope(backgroundScope.coroutineContext+UnconfinedTestDispatcher(testScheduler)),
+            wallClockMs={BASE},monotonicMs={MONO})
+        engine.start(startConfig())
+        val s=engine.stop("s")
+        assertNotNull(s.error)
+        assertTrue(s.state!=NativeTrackingState.STOPPED || s.journalPending>0,"lost journal must not advertise a durable final snapshot")
+    }
+    @Test fun failedRealFileWriterCannotClaimZeroUndurableLines() {
+        val parent=java.io.File.createTempFile("gps-audit","not-dir")
+        val sink=FileJournalSink(java.io.File(parent,"s.jnl"))
+        try {
+            sink.append("record");sink.flush()
+            assertNotNull(sink.failure)
+            assertTrue(sink.pending>0,"a failed write is still not durable")
+        } finally {sink.close();parent.delete()}
     }
 }

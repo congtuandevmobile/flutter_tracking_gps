@@ -19,3 +19,7 @@ Blocking I/O: call from `Dispatchers.IO`. Tested by `FileJournalStoreTest` and, 
 `DurableSink.pending` counts lines queued but not on disk (public as `journalPending`). `rewrite(id, lines, keepBackup)` copies the original to `<name>.corrupt` first when the damage was in the MIDDLE of the file.
 
 `pending` now counts lines that are not DURABLE: queued, or written but not `fsync`ed. The writer syncs after a write when a second passed, when idle, and at every barrier.
+
+## Recheck update
+
+The writer is ONE coroutine on `Dispatchers.IO.limitedParallelism(1)`. `flush()` is true only when everything is on disk and nothing failed; `pending` includes LOST lines (never subtracted); `failure` is sticky; `close()` joins the writer. `rewrite` writes a temp file, syncs, then renames atomically (original untouched on failure); `clear` and `rewrite` throw when the writer did not stop; `release(id)` frees an idle writer after stop.

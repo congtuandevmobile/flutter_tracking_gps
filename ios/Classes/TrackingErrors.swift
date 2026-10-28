@@ -18,6 +18,8 @@ enum TrackingErrorCode {
     static let engineChanged = "ENGINE_CHANGED"
     static let storeListFailed = "STORE_LIST_FAILED"
     static let sessionOpen = "SESSION_OPEN"
+    /// An operation was replaced by a newer session (start or restore) before it could finish.
+    static let superseded = "SUPERSEDED"
 }
 
 /// Failures the engine itself detects.

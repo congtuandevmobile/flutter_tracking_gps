@@ -163,4 +163,32 @@ void main() {
       expect(e.totalMeters, before);
     });
   });
+
+  group('weak interval identity (report R04)', () {
+    test('a late batch of an old weak interval never funds a later gap', () {
+      final e = _engine(const TrackingConfig(initialStrideMeters: 1))
+        ..onFix(fixAt(0, 0, 0, speed: 3), at(0))
+        ..onFix(fixAt(1, 10, 30, speed: 3), at(10))
+        ..onFix(fixAt(2, 12, 33, accuracy: 90), at(12))
+        ..onFix(fixAt(3, 16, 48, speed: 3), at(16))
+        ..onTick(at(27))
+        ..onSteps(at(28), 30, segmentId: 0, from: at(11), to: at(14), deliveredAt: at(28));
+      expect(e.snapshot.pendingPdrMeters, 0);
+    });
+
+    test('the step evidence of an old gap does not defeat the next gap\'s no-step rule', () {
+      final e = _engine(const TrackingConfig(initialStrideMeters: 1))
+        ..setStepSensorActive(active: true)
+        ..onFix(fixAt(0, 0, 0, speed: 3), at(0))
+        ..onFix(fixAt(1, 10, 30, speed: 3), at(10))
+        ..onFix(fixAt(2, 12, 33, accuracy: 90), at(12))
+        ..onSteps(at(15), 6, segmentId: 0, from: at(11), to: at(14), deliveredAt: at(15))
+        ..onFix(fixAt(3, 16, 48, speed: 3), at(16));
+      final before = e.totalMeters;
+      e
+        ..onTick(at(27))
+        ..onFix(fixAt(4, 60, 98, speed: 3), at(60));
+      expect(e.totalMeters, before);
+    });
+  });
 }

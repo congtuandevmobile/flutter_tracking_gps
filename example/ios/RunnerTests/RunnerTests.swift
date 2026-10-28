@@ -98,6 +98,7 @@ private final class MemoryStore: JournalStoring {
     /// When false, appended lines stay "queued" until flush (a slow disk).
     var autoWrite = true
     var onFlush: (() -> Void)?
+    var failOnAppend = false
     private var sinks: [String: MemorySink] = [:]
 
     final class MemorySink: NSObject, DurableSink {
@@ -105,18 +106,26 @@ private final class MemoryStore: JournalStoring {
         let id: String
         var failure: Error?
         private var queue: [String] = []
-        var pending: Int { queue.count }
+        var lost = 0
+        /// Queued AND lost lines: a lost line is never durable, so it stays pending (as the real writer does).
+        var pending: Int { queue.count + lost }
         init(store: MemoryStore, id: String) { self.store = store; self.id = id }
         func append(line: String) {
+            if store.failOnAppend {
+                failure = failure ?? NSError(domain: "disk", code: 28)
+                lost += 1
+                return
+            }
             if store.autoWrite { store.files[id, default: []].append(line) } else { queue.append(line) }
         }
-        func flush() {
+        func flush() -> Bool {
             store.flushes += 1
             store.files[id, default: []].append(contentsOf: queue)
             queue.removeAll()
             store.onFlush?()
+            return failure == nil && lost == 0
         }
-        func close() {}
+        func close() -> Bool { true }
     }
 
     func open(_ sessionId: String) -> DurableSink {
@@ -132,6 +141,7 @@ private final class MemoryStore: JournalStoring {
         files[sessionId] = lines
     }
     func clear(_ sessionId: String) throws { files[sessionId] = nil; sinks[sessionId] = nil }
+    func release(_ sessionId: String) {}
     func list() throws -> [String] {
         files.values.compactMap { ($0.first.flatMap { JournalCodec.shared.decode(line: $0) } as? JournalRecord.Header)?.sessionId }
     }
@@ -718,5 +728,86 @@ final class RunnerTests: XCTestCase {
         let partial: NativeSnapshot = try run { c.restore(config: config(), completion: $0) }
         XCTAssertEqual(partial.restoreState, .partial)
         XCTAssertLessThan(partial.fixCount, 6, "everything after the damage was NOT applied")
+    }
+
+    // MARK: - Operation identity and per-segment finality (recheck R07, R08)
+
+    func testASecondStopJoinsTheFinishInProgress() throws {
+        let steps = FakeSteps(clock: clock)
+        steps.autoAnswer = nil
+        let engine = makeEngine(FakeProvider(clock: clock), steps: steps)
+        let _: NativeSnapshot = try run { engine.start(config: config(steps: true), completion: $0) }
+        steps.push(30)
+        let first = expectation(description: "first stop")
+        let second = expectation(description: "second stop")
+        var a: NativeSnapshot?
+        var b: NativeSnapshot?
+        engine.stop(sessionId: "s") { a = try? $0.get(); first.fulfill() }
+        engine.stop(sessionId: "s") { b = try? $0.get(); second.fulfill() }
+        drain(engine)
+        XCTAssertEqual(steps.heldCount, 1, "one finalization: the second stop did not start another query")
+        steps.release(.success(33))
+        wait(for: [first, second], timeout: 5)
+        XCTAssertEqual(try XCTUnwrap(a).state, .stopped)
+        XCTAssertEqual(try XCTUnwrap(b).state, .stopped, "the joiner gets the same final result, not a FINISHING snapshot")
+        XCTAssertTrue(try XCTUnwrap(b).stepsFinal)
+    }
+
+    func testANewStartDuringAFinishAnswersTheOldStopWithAnExplicitFailure() throws {
+        let steps = FakeSteps(clock: clock)
+        steps.autoAnswer = nil
+        let engine = makeEngine(FakeProvider(clock: clock), steps: steps)
+        let _: NativeSnapshot = try run { engine.start(config: config("a", steps: true), completion: $0) }
+        steps.push(30)
+        let stopped = expectation(description: "old stop answered")
+        var outcome: Result<NativeSnapshot, Error>?
+        engine.stop(sessionId: "a") { outcome = $0; stopped.fulfill() }
+        drain(engine)
+        let b: NativeSnapshot = try run { engine.start(config: config("b", steps: true), completion: $0) }
+        wait(for: [stopped], timeout: 5)
+        guard case .failure(let error)? = outcome else { return XCTFail("the superseded stop must fail, not succeed") }
+        XCTAssertEqual((error as? PigeonError)?.code, TrackingErrorCode.superseded)
+        XCTAssertEqual(b.state, .running)
+        steps.release(.success(999), at: 0)  // the old session's late answer
+        drain(engine)
+        XCTAssertEqual(engine.snapshot().state, .running)
+        XCTAssertEqual(engine.snapshot().sessionId, "b")
+        XCTAssertEqual(engine.snapshot().distance.steps, 0, "nothing of session a reaches session b")
+    }
+
+    func testAProvisionalSegmentIsNotUpgradedByALaterExactOne() throws {
+        let steps = FakeSteps(clock: clock)
+        steps.autoAnswer = .failure(.timeout)  // segment 0: the exact query fails
+        let engine = makeEngine(FakeProvider(clock: clock), steps: steps)
+        let _: NativeSnapshot = try run { engine.start(config: config(steps: true), completion: $0) }
+        steps.push(10)
+        let _: NativeSnapshot = try run { engine.pause(sessionId: "s", completion: $0) }
+        steps.autoAnswer = .success(5)  // segment 1 will be exact
+        let _: NativeSnapshot = try run { engine.resume(sessionId: "s", completion: $0) }
+        steps.push(5)
+        let final: NativeSnapshot = try run { engine.stop(sessionId: "s", completion: $0) }
+        XCTAssertEqual(final.state, .stopped)
+        XCTAssertFalse(final.stepsFinal, "segment 0 stayed provisional: the total cannot be final")
+    }
+
+    func testAJournalWriteFailureIsReportedAndNeverLooksDurable() throws {
+        let store = MemoryStore()
+        store.failOnAppend = true
+        let engine = makeEngine(FakeProvider(clock: clock), store)
+        let _: NativeSnapshot = try run { engine.start(config: config(), completion: $0) }
+        let s: NativeSnapshot = try run { engine.stop(sessionId: "s", completion: $0) }
+        XCTAssertTrue(s.journalFailed)
+        XCTAssertGreaterThan(s.journalPending, 0, "lost lines stay pending: not durable")
+        XCTAssertNotNil(s.error)
+    }
+
+    func testAnErrorAfterPauseIsIgnored() throws {
+        let provider = FakeProvider(clock: clock)
+        let engine = makeEngine(provider)
+        let _: NativeSnapshot = try run { engine.start(config: config(), completion: $0) }
+        let _: NativeSnapshot = try run { engine.pause(sessionId: "s", completion: $0) }
+        engine.locationProvider(provider, didFailWith: NSError(domain: kCLErrorDomain, code: CLError.denied.rawValue))
+        drain(engine)
+        XCTAssertEqual(engine.snapshot().state, .paused, "a late location error must not turn a paused session into an error")
     }
 }

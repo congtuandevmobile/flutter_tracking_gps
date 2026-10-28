@@ -12,7 +12,7 @@ totals, gaps and times. Keeping only the fixes (as the first version did) lost
 the step events, the accepted estimates and the configuration, so a restored
 recording could differ from the live one.
 
-## Format (version 1)
+## Format (version 2; version 1 journals are still read)
 
 One record per line: `CRC32|TYPE|field|field|...`
 
@@ -28,12 +28,13 @@ One record per line: `CRC32|TYPE|field|field|...`
 | `H` | Header: format version, engine version, session id, start (monotonic and wall), first segment, initial steps, the 20 engine settings, and the host's extras (notification text, request interval...) |
 | `P` / `R` / `F` | Pause, Resume (with the new segment), Finish |
 | `X` | A raw fix and the time it ARRIVED (`nowMs`): a fix rejected live as stale is rejected in the replay too |
-| `T` | A tick, written only when it changed the state (GPS silence); ticks are otherwise not inputs |
+| `T` | A tick: EVERY tick is journaled (about one per second), because a tick can change state (GPS silence) and replay must see the same clock |
 | `C` / `S` | A device step counter reading (Android) / a segment step count (iOS), each with its measured and delivered times |
 | `K` | An exact step count for the segment just closed |
 | `A` | Step sensor active / inactive |
 | `D` | A step estimate from the app (`submitPdr`) |
 | `Z` | Finalized: written once after `Finish`; whether the step total was settled (exact) or only the live count |
+| `Y` | A segment settled: whether ITS step count became exact. The total is final only when every stepped segment settled exactly (one provisional segment is never upgraded by another) |
 
 ## Reading
 
@@ -108,3 +109,20 @@ middle of the file is reported, never silently skipped, and the original is kept
   belong to native and are not re-run.
 - **Merging a watch.** Needs a source id per record, de-duplication and a rule that two
   devices never both contribute steps or distance for the same interval.
+
+## Encoding and the validation boundary
+
+Field text escapes `%`, `|`, `=`, `,`, newline and carriage return as `%XX` (so a comma or an
+emoji in an extra, such as a notification text, round-trips). A pause, resume or finish the core
+REFUSES (wrong state) is not journaled and never throws: the refusal is reported
+(`lastFailure`). The engine is started before the header is written, so a journal never begins
+with something that cannot be replayed. Replay stops at the first record that cannot be applied:
+status `CORRUPT`, `damagedLine` set, nothing after it applied.
+
+## Durability, truthfully
+
+`flush()` returns true only when everything appended is on disk AND no write or sync ever failed.
+A line whose write or sync failed stays pending for good (`journalPending`), and the failure is
+sticky (`journalFailed`): a failure can never look like "everything is saved". `rewrite` replaces
+the file atomically (temp file, sync, atomic swap), keeping `<name>.corrupt` when damage was in the
+middle.

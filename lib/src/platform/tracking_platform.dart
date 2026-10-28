@@ -96,6 +96,7 @@ class PlatformSnapshot {
     this.stepsStatus = StepsStatus.off,
     this.stepsFinal = false,
     this.journalPending = 0,
+    this.journalFailed = false,
     this.restoreState = RestoreState.notRestored,
     this.engineChanged = false,
     this.sessionId,
@@ -112,6 +113,9 @@ class PlatformSnapshot {
 
   /// Events accepted but not on disk yet (see `TrackingSnapshot.isDurable`).
   final int journalPending;
+
+  /// A journal write or sync failed (sticky): the lost events are never durable.
+  final bool journalFailed;
   final RestoreState restoreState;
   final bool engineChanged;
   final String? error;

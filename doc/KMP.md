@@ -58,11 +58,11 @@ Wired end to end. `TrackingCoreBridge` (`bridge/`) is the one door: Android's
 every fix and a 1 Hz tick, and publish its snapshot to Dart over the Pigeon event
 channel. Adaptive sampling and the silence limit live in the bridge.
 
-Verified here: 59 JVM tests of the core (including the bridge, the audit
-regressions and the shared CSV fixtures, which the Dart engine also passes), 10
-JVM unit tests of the Android engine (fake location source and store), 10
-XCTests of the iOS engine (real Kotlin core through the XCFramework), 37 Dart
-tests, and debug builds of the
+Verified here: 173 JVM tests of the core (including the bridge, the audit
+regressions and the shared CSV fixtures, which the Dart engine also passes), 47
+JVM unit tests of the Android layer (fake location source and store, real file
+store, foreground handshake), 39 XCTests of the iOS engine (real Kotlin core
+through the XCFramework), 87 Dart tests, and debug builds of the
 example app for Android and the iOS simulator.
 
 Not verified: anything on a physical device (battery, background survival, OEM

@@ -48,3 +48,7 @@ Step events are admitted by recording state, segment id and leg start time BEFOR
 
 ## Step intervals and new fields (updated)
 `onStepCounter(segmentId, measuredAtMs, deliveredAtMs, raw)` and `onSegmentSteps(segmentId, measuredAtMs, deliveredAtMs, count)` carry the sensor's own measurement time and the delivery time; the bridge turns them into the interval since the previous reading (the first counter reading of a segment is a baseline). `setStepSensorActive(active)`. Constructor gains `pdrTrustedWhenCalibrated` and `recoveryStepEvidenceAfterMs`. `BridgeSnapshot` gains `activeTimeMs`, `bridgedGapMs`, `uncreditedGapMs`, `uncreditedGaps`, `ambiguousSteps`. Natives use `SessionRecorder` (journal + bridge) instead of the bridge directly.
+
+## Recheck update
+
+`acceptsSteps` validates the measurement time before any counter changes: measured after delivery (+2 s slack), before the leg start (except the first counter baseline) or older than the cursor are refused. `BridgeSnapshot.distanceEligibleSteps` added.

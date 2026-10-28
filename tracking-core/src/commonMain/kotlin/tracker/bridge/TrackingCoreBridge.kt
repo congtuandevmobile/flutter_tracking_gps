@@ -165,10 +165,13 @@ class TrackingCoreBridge(
      * which is what the engine classifies by GPS quality.
      */
     fun onStepCounter(segmentId: Int, measuredAtMs: Long, deliveredAtMs: Long, raw: Long) {
-        if (!acceptsSteps(segmentId, deliveredAtMs)) return
-        val from = lastStepMeasuredMs ?: measuredAtMs
+        // The FIRST reading of a segment is only a baseline (it adds nothing), so its own measurement time, which on
+        // Android is the time of the last step and may well precede the leg, does not disqualify it.
+        val baseline = lastStepMeasuredMs == null
+        if (!acceptsSteps(segmentId, measuredAtMs, deliveredAtMs, baseline)) return
+        val from = lastStepMeasuredMs ?: maxOf(stepLegStartedAtMs, minOf(measuredAtMs, deliveredAtMs))
         val added = steps.onCounter(raw)
-        lastStepMeasuredMs = maxOf(from, measuredAtMs)
+        lastStepMeasuredMs = maxOf(from, minOf(measuredAtMs, deliveredAtMs))
         if (added > 0L) engine.onSteps(segmentId, from, maxOf(from, measuredAtMs), deliveredAtMs, added)
     }
 
@@ -178,15 +181,26 @@ class TrackingCoreBridge(
      * [deliveredAtMs].
      */
     fun onSegmentSteps(segmentId: Int, measuredAtMs: Long, deliveredAtMs: Long, segmentSteps: Long) {
-        if (!acceptsSteps(segmentId, deliveredAtMs)) return
+        if (!acceptsSteps(segmentId, measuredAtMs, deliveredAtMs, baseline = false)) return
         val from = lastStepMeasuredMs ?: stepLegStartedAtMs
         val added = steps.onSegmentCount(segmentSteps)
         lastStepMeasuredMs = maxOf(from, measuredAtMs)
         if (added > 0L) engine.onSteps(segmentId, from, maxOf(from, measuredAtMs), deliveredAtMs, added)
     }
 
-    private fun acceptsSteps(segment: Int, deliveredAtMs: Long): Boolean =
-        engine.state == RecordingState.RUNNING && segment == engine.segmentId && deliveredAtMs >= stepLegStartedAtMs
+    /**
+     * Admits a step reading BEFORE any counter changes. The measurement time is checked as well as the delivery
+     * time: an interval measured before the leg began, one that ends after it was delivered (a broken clock) or
+     * one that goes back before the previous reading belongs to nothing this leg can account for.
+     */
+    private fun acceptsSteps(segment: Int, measuredAtMs: Long, deliveredAtMs: Long, baseline: Boolean): Boolean {
+        if (engine.state != RecordingState.RUNNING || segment != engine.segmentId || deliveredAtMs < stepLegStartedAtMs) return false
+        if (measuredAtMs > deliveredAtMs + MEASURED_AFTER_DELIVERED_SLACK_MS) return false
+        if (baseline) return true
+        if (measuredAtMs < stepLegStartedAtMs) return false
+        val cursor = lastStepMeasuredMs
+        return cursor == null || measuredAtMs >= cursor
+    }
 
     /**
      * An exact count for the segment that was just paused or finished (iOS asks
@@ -327,5 +341,6 @@ class TrackingCoreBridge(
 
     private companion object {
         const val UNKNOWN = -1.0
+        const val MEASURED_AFTER_DELIVERED_SLACK_MS = 2_000L
     }
 }

@@ -245,6 +245,7 @@ class PigeonTrackingPlatform implements TrackingPlatform {
     },
     stepsFinal: s.stepsFinal,
     journalPending: s.journalPending,
+    journalFailed: s.journalFailed,
     restoreState: switch (s.restoreState) {
       NativeRestoreState.notRestored => RestoreState.notRestored,
       NativeRestoreState.complete => RestoreState.complete,

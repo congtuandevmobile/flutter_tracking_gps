@@ -732,6 +732,10 @@ struct NativeSnapshot: Hashable {
   /// journal writer). Zero means everything shown here is durable; a crash while
   /// this is above zero can lose that many of the latest events.
   var journalPending: Int64
+  /// A journal write or sync FAILED (or its barrier timed out). Sticky: once true,
+  /// what this snapshot shows is NOT guaranteed to survive a crash, whatever
+  /// [journalPending] says, and the recording must be treated as not durable.
+  var journalFailed: Bool
   /// True when the step total is final: after `stop`, the platform's exact count
   /// for the closed segment was obtained (or there is no step sensor). False
   /// means the total is the live count, which may still be corrected.
@@ -754,21 +758,23 @@ struct NativeSnapshot: Hashable {
     let restoreState = pigeonVar_list[1] as! NativeRestoreState
     let engineChanged = pigeonVar_list[2] as! Bool
     let journalPending = pigeonVar_list[3] as! Int64
-    let stepsFinal = pigeonVar_list[4] as! Bool
-    let sessionId: String? = nilOrValue(pigeonVar_list[5])
-    let state = pigeonVar_list[6] as! NativeTrackingState
-    let segmentId = pigeonVar_list[7] as! Int64
-    let distance = pigeonVar_list[8] as! NativeDistance
-    let fixCount = pigeonVar_list[9] as! Int64
-    let lastFixTimeMs: Int64? = nilOrValue(pigeonVar_list[10])
-    let updatedAtMs = pigeonVar_list[11] as! Int64
-    let error: String? = nilOrValue(pigeonVar_list[12])
+    let journalFailed = pigeonVar_list[4] as! Bool
+    let stepsFinal = pigeonVar_list[5] as! Bool
+    let sessionId: String? = nilOrValue(pigeonVar_list[6])
+    let state = pigeonVar_list[7] as! NativeTrackingState
+    let segmentId = pigeonVar_list[8] as! Int64
+    let distance = pigeonVar_list[9] as! NativeDistance
+    let fixCount = pigeonVar_list[10] as! Int64
+    let lastFixTimeMs: Int64? = nilOrValue(pigeonVar_list[11])
+    let updatedAtMs = pigeonVar_list[12] as! Int64
+    let error: String? = nilOrValue(pigeonVar_list[13])
 
     return NativeSnapshot(
       stepsStatus: stepsStatus,
       restoreState: restoreState,
       engineChanged: engineChanged,
       journalPending: journalPending,
+      journalFailed: journalFailed,
       stepsFinal: stepsFinal,
       sessionId: sessionId,
       state: state,
@@ -786,6 +792,7 @@ struct NativeSnapshot: Hashable {
       restoreState,
       engineChanged,
       journalPending,
+      journalFailed,
       stepsFinal,
       sessionId,
       state,
@@ -801,7 +808,7 @@ struct NativeSnapshot: Hashable {
     if Swift.type(of: lhs) != Swift.type(of: rhs) {
       return false
     }
-    return deepEqualsTrackingApi(lhs.stepsStatus, rhs.stepsStatus) && deepEqualsTrackingApi(lhs.restoreState, rhs.restoreState) && deepEqualsTrackingApi(lhs.engineChanged, rhs.engineChanged) && deepEqualsTrackingApi(lhs.journalPending, rhs.journalPending) && deepEqualsTrackingApi(lhs.stepsFinal, rhs.stepsFinal) && deepEqualsTrackingApi(lhs.sessionId, rhs.sessionId) && deepEqualsTrackingApi(lhs.state, rhs.state) && deepEqualsTrackingApi(lhs.segmentId, rhs.segmentId) && deepEqualsTrackingApi(lhs.distance, rhs.distance) && deepEqualsTrackingApi(lhs.fixCount, rhs.fixCount) && deepEqualsTrackingApi(lhs.lastFixTimeMs, rhs.lastFixTimeMs) && deepEqualsTrackingApi(lhs.updatedAtMs, rhs.updatedAtMs) && deepEqualsTrackingApi(lhs.error, rhs.error)
+    return deepEqualsTrackingApi(lhs.stepsStatus, rhs.stepsStatus) && deepEqualsTrackingApi(lhs.restoreState, rhs.restoreState) && deepEqualsTrackingApi(lhs.engineChanged, rhs.engineChanged) && deepEqualsTrackingApi(lhs.journalPending, rhs.journalPending) && deepEqualsTrackingApi(lhs.journalFailed, rhs.journalFailed) && deepEqualsTrackingApi(lhs.stepsFinal, rhs.stepsFinal) && deepEqualsTrackingApi(lhs.sessionId, rhs.sessionId) && deepEqualsTrackingApi(lhs.state, rhs.state) && deepEqualsTrackingApi(lhs.segmentId, rhs.segmentId) && deepEqualsTrackingApi(lhs.distance, rhs.distance) && deepEqualsTrackingApi(lhs.fixCount, rhs.fixCount) && deepEqualsTrackingApi(lhs.lastFixTimeMs, rhs.lastFixTimeMs) && deepEqualsTrackingApi(lhs.updatedAtMs, rhs.updatedAtMs) && deepEqualsTrackingApi(lhs.error, rhs.error)
   }
 
   func hash(into hasher: inout Hasher) {
@@ -810,6 +817,7 @@ struct NativeSnapshot: Hashable {
     deepHashTrackingApi(value: restoreState, hasher: &hasher)
     deepHashTrackingApi(value: engineChanged, hasher: &hasher)
     deepHashTrackingApi(value: journalPending, hasher: &hasher)
+    deepHashTrackingApi(value: journalFailed, hasher: &hasher)
     deepHashTrackingApi(value: stepsFinal, hasher: &hasher)
     deepHashTrackingApi(value: sessionId, hasher: &hasher)
     deepHashTrackingApi(value: state, hasher: &hasher)

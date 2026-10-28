@@ -13,7 +13,7 @@ class ReplayPerformanceTest {
     private class MemSink : JournalSink {
         val lines = ArrayList<String>()
         override fun append(line: String) { lines.add(line) }
-        override fun flush() {}
+        override fun flush(): Boolean = true
     }
 
     @Test fun replayingATenHourRecordingAtOneHertzTakesWellUnderTheBudget() {

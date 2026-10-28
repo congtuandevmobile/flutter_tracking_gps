@@ -31,8 +31,15 @@ class JournalContents(
  * Numbers use Kotlin's shortest round-trip text; text fields are escaped.
  */
 object JournalCodec {
-    /** The journal FORMAT. A reader refuses a newer one. */
-    const val VERSION = 1
+    /**
+     * The journal FORMAT written by this code. Bump it whenever a record is added or changed in a way an
+     * older reader would misread: an older reader refuses a newer version (UNSUPPORTED_VERSION) instead of
+     * treating a valid new record as damage. Version 2 added `Z` (finalized) and `Y` (segment settled).
+     */
+    const val VERSION = 2
+
+    /** The oldest format this code still reads (version 1 has no `Z`/`Y` records). */
+    const val MIN_VERSION = 1
 
     /**
      * The RULES of the engine (`GpsDistanceEngine` and what it uses). Bump it whenever a
@@ -40,7 +47,7 @@ object JournalCodec {
      * written by another engine version is replayed anyway but flagged: restore is
      * "rebuild what was shown" only while the version matches.
      */
-    const val ENGINE_VERSION = 1
+    const val ENGINE_VERSION = 2
 
     fun encode(r: JournalRecord): String {
         val body = when (r) {
@@ -69,6 +76,7 @@ object JournalCodec {
             is JournalRecord.StepSensor -> join("A", b(r.active))
             is JournalRecord.Pdr -> join("D", r.segmentId, r.atMs, r.meters)
             is JournalRecord.Finalized -> join("Z", b(r.stepsFinal))
+            is JournalRecord.SegmentSettled -> join("Y", r.segmentId, b(r.exact))
         }
         return Wire.hex8(Wire.crc32(body)) + "|" + body
     }
@@ -102,6 +110,7 @@ object JournalCodec {
                 "A" -> need(f, 2) { JournalRecord.StepSensor(f[1] == "1") }
                 "D" -> need(f, 4) { JournalRecord.Pdr(f[1].toInt(), f[2].toLong(), f[3].toDouble()) }
                 "Z" -> need(f, 2) { JournalRecord.Finalized(f[1] == "1") }
+                "Y" -> need(f, 3) { JournalRecord.SegmentSettled(f[1].toInt(), f[2] == "1") }
                 else -> null
             }
         } catch (e: NumberFormatException) {
@@ -129,7 +138,7 @@ object JournalCodec {
             }
             if (i == 0) {
                 if (r !is JournalRecord.Header) return JournalContents(emptyList(), JournalStatus.CORRUPT, 0)
-                if (r.version > VERSION) return JournalContents(emptyList(), JournalStatus.UNSUPPORTED_VERSION, 0)
+                if (r.version > VERSION || r.version < MIN_VERSION) return JournalContents(emptyList(), JournalStatus.UNSUPPORTED_VERSION, 0)
             }
             out.add(r)
         }

@@ -83,11 +83,24 @@ final class TrackingEngine: LocationProviderDelegate {
     private var stepGeneration = 0
     /// Identity of the session: bumped at every start and restore. A late correction carries it.
     private var sessionToken = 0
-    private var stepCloseInFlight = false
-    private var lastCloseExact = false
+    /// Step closes (a pause or the stop) of the CURRENT session that have not answered yet. A late answer of
+    /// an older session carries an older token and never touches this count.
+    private var openStepCloses = 0
     private var stepCloseWaiters: [() -> Void] = []
+    /// Whether the finished session's step total is settled (every stepped segment got the exact count).
+    private var liveStepsFinal = false
+    /// The one finish in progress: a second `stop` joins it instead of starting another.
+    private var finishOp: FinishOperation?
+
+    /// A finish in progress, bound to the session it started for. Every asynchronous boundary re-checks it.
+    private final class FinishOperation {
+        let token: Int
+        var completions: [(Result<NativeSnapshot, Error>) -> Void] = []
+        init(token: Int) { self.token = token }
+    }
 
     static let exactStepsTimeout: TimeInterval = 3
+    static let permissionTimeout: TimeInterval = 120
 
     init(
         provider: LocationProviding, store: JournalStoring,
@@ -121,6 +134,14 @@ final class TrackingEngine: LocationProviderDelegate {
                 DispatchQueue.main.async { completion(status) }
             }
             self.provider.requestWhenInUseAuthorization()
+            // Bounded: if the system never answers, waiters get the current status instead of waiting forever.
+            self.queue.asyncAfter(deadline: .now() + Self.permissionTimeout) { [weak self] in
+                guard let self = self, !self.permissionWaiters.isEmpty else { return }
+                let waiters = self.permissionWaiters
+                self.permissionWaiters.removeAll()
+                let status = self.provider.permission
+                waiters.forEach { $0(status) }
+            }
         }
     }
 
@@ -148,7 +169,7 @@ final class TrackingEngine: LocationProviderDelegate {
             if self.state == .running { self.provider.stopUpdates() }
             self.stopTicker()
             self.endSteps()
-            self.sessionToken += 1
+            self.beginNewSession()
             // A fresh journal: a new start must never be mixed with an old one of the same id.
             do {
                 try self.store.clear(config.sessionId)
@@ -166,11 +187,20 @@ final class TrackingEngine: LocationProviderDelegate {
                 "stepsEnabled": String(config.stepsEnabled),
             ]
             let now = self.monotonicMs()
-            let recorder = SessionRecorder.Companion.shared.start(
+            let started = SessionRecorder.Companion.shared.tryStart(
                 sink: sink,
                 settings: makeSettings(config.engine, adaptiveSampling: config.adaptiveSampling, batterySaver: config.batterySaver),
                 sessionId: config.sessionId, atMs: now, wallAtMs: self.wallMs(self.wallNow()),
                 segmentId: Int32(config.startSegmentId), initialSteps: config.initialSteps, extras: newExtras)
+            guard let recorder = started.recorder else {
+                self.store.release(config.sessionId)
+                self.deliver(
+                    .failure(trackingError(
+                        code: TrackingErrorCode.startFailed,
+                        message: "the engine refused the configuration (\(started.error ?? "invalid"))")),
+                    to: completion)
+                return
+            }
             self.recorder = recorder
             self.sink = sink
             self.sessionId = config.sessionId
@@ -188,7 +218,7 @@ final class TrackingEngine: LocationProviderDelegate {
             self.stepsEnabled = config.stepsEnabled
             self.stepsStatus = .off
             self.stepsEverActive = false
-            self.lastCloseExact = false
+            self.liveStepsFinal = false
             self.legStartMono = now
             guard self.provider.permission == .granted else {
                 self.state = .permissionDenied
@@ -272,10 +302,16 @@ final class TrackingEngine: LocationProviderDelegate {
     }
 
     /// Finishes the session. Answers only after the exact step count is in (or failed, or timed out) and
-    /// the journal is durable, so the returned snapshot is final.
+    /// the journal is durable, so the returned snapshot is final. A second `stop` while one is in progress
+    /// JOINS it (same result, one finalization); a finish overtaken by a newer start/restore is answered with
+    /// an explicit `SUPERSEDED` failure, never with the newer session's snapshot.
     func stop(sessionId id: String, completion: @escaping (Result<NativeSnapshot, Error>) -> Void) {
         queue.async { [weak self] in
             guard let self = self else { return }
+            if id == self.sessionId, self.state == .finishing, let op = self.finishOp, op.token == self.sessionToken {
+                op.completions.append(completion)
+                return
+            }
             guard id == self.sessionId, self.state != .idle, self.state != .stopped, self.state != .finishing else {
                 self.deliver(.success(self.makeSnapshot()), to: completion)
                 return
@@ -287,21 +323,35 @@ final class TrackingEngine: LocationProviderDelegate {
             // meanwhile may pass for a final result.
             self.state = .finishing
             self.recorder?.finish(atMs: self.monotonicMs())
-            let token = self.sessionToken
+            let op = FinishOperation(token: self.sessionToken)
+            op.completions.append(completion)
+            self.finishOp = op
             let finalize: () -> Void = { [weak self] in
-                guard let self = self, token == self.sessionToken else { return }
+                guard let self = self, self.finishOp === op, op.token == self.sessionToken else { return }
                 // Settle the step total IN the journal before the flush: a restore of this session then
-                // reports the same finality as the live result.
-                let settled = self.lastCloseExact || !self.stepsEverActive
+                // reports the same finality as the live result. Per segment: one provisional segment keeps
+                // the whole total provisional.
+                let settled = self.recorder?.allStepsExact() ?? true
                 self.recorder?.markFinalized(stepsFinal: settled)
                 let recorder = self.recorder
+                let finishedId = id
                 self.storeQueue.async { [weak self] in
-                    recorder?.flush()
+                    _ = recorder?.flush()
                     self?.queue.async { [weak self] in
                         guard let self = self else { return }
+                        // The session may have been replaced while the journal was flushing.
+                        guard self.finishOp === op, op.token == self.sessionToken else {
+                            self.finish(op, with: .failure(trackingError(
+                                code: TrackingErrorCode.superseded,
+                                message: "the session was replaced by a newer one before it finished")))
+                            return
+                        }
+                        self.liveStepsFinal = settled
                         self.state = .stopped
+                        self.finishOp = nil
+                        self.storeQueue.async { [weak self] in self?.store.release(finishedId) }
                         self.publish()
-                        self.deliver(.success(self.makeSnapshot()), to: completion)
+                        self.finish(op, with: .success(self.makeSnapshot()))
                     }
                 }
             }
@@ -311,6 +361,28 @@ final class TrackingEngine: LocationProviderDelegate {
                 self.afterStepClose(finalize)  // paused: its close may still be in flight
             }
         }
+    }
+
+    /// Answers every caller waiting on `op`, once.
+    private func finish(_ op: FinishOperation, with result: Result<NativeSnapshot, Error>) {
+        let waiting = op.completions
+        op.completions.removeAll()
+        waiting.forEach { deliver(result, to: $0) }
+    }
+
+    /// A start or restore takes over: a finish still in progress is answered with an explicit failure and
+    /// forgotten, and the old session's step-close bookkeeping is dropped (its late answers carry an older
+    /// token and are ignored).
+    private func beginNewSession() {
+        if let op = finishOp {
+            finishOp = nil
+            finish(op, with: .failure(trackingError(
+                code: TrackingErrorCode.superseded,
+                message: "the session was replaced by a newer one before it finished")))
+        }
+        sessionToken += 1
+        openStepCloses = 0
+        stepCloseWaiters.removeAll()
     }
 
     /// A step estimate for `segmentId` from the app's own source: held as pending until the GPS that
@@ -343,7 +415,7 @@ final class TrackingEngine: LocationProviderDelegate {
             }
             self.queue.async { [weak self] in
                 guard let self = self else { return }
-                let running = self.state == .running || self.state == .paused
+                let running = self.state == .running || self.state == .paused || self.state == .finishing
                 if config.sessionId == self.sessionId, running {
                     self.deliver(.success(self.makeSnapshot()), to: completion)
                     return
@@ -382,7 +454,7 @@ final class TrackingEngine: LocationProviderDelegate {
                         to: completion)
                     return
                 }
-                self.sessionToken += 1
+                self.beginNewSession()
                 self.recorder = recorder
                 self.sink = sink
                 self.sessionId = result.sessionId
@@ -395,7 +467,7 @@ final class TrackingEngine: LocationProviderDelegate {
                 self.stepsEnabled = result.extras["stepsEnabled"] == "true"
                 self.stepsStatus = .off
                 self.stepsEverActive = false
-                self.lastCloseExact = false
+                self.liveStepsFinal = false
                 self.minDistanceMeters = Double(result.extras["minDistanceMeters"] ?? "") ?? config.minDistanceMeters
                 if result.engineChanged {
                     self.lastError = "\(TrackingErrorCode.engineChanged): the journal was recorded with engine \(result.engineVersion); the replay may differ from what was shown live"
@@ -550,7 +622,8 @@ final class TrackingEngine: LocationProviderDelegate {
 
     func locationProvider(_ provider: LocationProviding, didFailWith error: Error) {
         queue.async { [weak self] in
-            guard let self = self else { return }
+            // Only a recording session reacts: an error that arrives after pause/stop belongs to nothing.
+            guard let self = self, self.state == .running else { return }
             // kCLErrorLocationUnknown is transient: CoreLocation keeps trying.
             let code = (error as NSError).code
             if (error as NSError).domain == kCLErrorDomain, code == CLError.locationUnknown.rawValue {
@@ -602,10 +675,12 @@ final class TrackingEngine: LocationProviderDelegate {
         let segment = Int32(segmentId)
         let start = wallNow()
         stepSegmentStart = start
+        let monotonic = monotonicMs
+        let wall = wallNow
         steps.startUpdates(from: start) { [weak self] result in
-            // Both clocks are read in the callback: that is when the reading reached us.
-            let arrivalMono = monotonicNowMs()
-            let arrivalWall = Date()
+            // Both (injected) clocks are read in the callback: that is when the reading reached us.
+            let arrivalMono = monotonic()
+            let arrivalWall = wall()
             self?.queue.async { [weak self] in
                 guard let self = self, generation == self.stepGeneration, self.state == .running else { return }
                 switch result {
@@ -634,9 +709,9 @@ final class TrackingEngine: LocationProviderDelegate {
         stepSegmentStart = nil
     }
 
-    /// Runs `block` once no step close is in flight (immediately when none is).
+    /// Runs `block` once no step close of the current session is in flight (immediately when none is).
     private func afterStepClose(_ block: @escaping () -> Void) {
-        if stepCloseInFlight {
+        if openStepCloses > 0 {
             stepCloseWaiters.append(block)
         } else {
             block()
@@ -645,9 +720,10 @@ final class TrackingEngine: LocationProviderDelegate {
 
     /// Ends the live subscription at a pause or stop and replaces the segment's live count with the OS's
     /// exact count up to the boundary. The answer carries the identity captured NOW (session token and
-    /// segment): it is dropped when another session or segment is current. It only corrects the displayed
-    /// total, never distance. `completion` runs on `queue` once the close is settled (exact, failed or
-    /// timed out); nil for a pause, which does not wait.
+    /// segment): it is dropped when another session is current. It only corrects the displayed total, never
+    /// distance. The outcome is journaled PER SEGMENT (`markSegmentSettled`): a segment whose query failed
+    /// stays provisional for good and is never upgraded by another segment's success. `completion` runs on
+    /// `queue` once the close is settled (exact, failed or timed out); nil for a pause, which does not wait.
     private func closeStepSegment(completion: (() -> Void)?) {
         let start = stepSegmentStart
         let token = sessionToken
@@ -658,29 +734,32 @@ final class TrackingEngine: LocationProviderDelegate {
             completion?()
             return
         }
-        stepCloseInFlight = true
-        lastCloseExact = false
+        openStepCloses += 1
         var settled = false  // touched only on `queue`: a SECOND answer (a late one after a timeout) is ignored
         steps.query(from: start, to: boundary, timeout: Self.exactStepsTimeout) { [weak self] result in
             self?.queue.async { [weak self] in
                 guard let self = self, !settled else { return }
                 settled = true
-                if token == self.sessionToken, self.segmentId == closedSegment {
-                    switch result {
-                    case .success(let exact):
-                        self.recorder?.correctClosedSegment(exactSteps: exact)
-                        self.lastCloseExact = true
-                    case .failure(let error):
-                        // Not "0 steps": the total stays the live count and says so.
-                        self.lastError = "\(error.code): \(error.message)"
-                    }
-                    self.publish()
+                // Another session is current: nothing of this answer applies, and the counters are not ours.
+                guard token == self.sessionToken else { return }
+                switch result {
+                case .success(let exact):
+                    // The correction applies to the segment that was closed, which may no longer be the latest.
+                    if self.segmentId == closedSegment { self.recorder?.correctClosedSegment(exactSteps: exact) }
+                    self.recorder?.markSegmentSettled(segmentId: Int32(closedSegment), exact: self.segmentId == closedSegment)
+                case .failure(let error):
+                    // Not "0 steps": the total stays the live count and says so.
+                    self.lastError = "\(error.code): \(error.message)"
+                    self.recorder?.markSegmentSettled(segmentId: Int32(closedSegment), exact: false)
                 }
-                self.stepCloseInFlight = false
+                self.publish()
+                self.openStepCloses -= 1
                 completion?()
-                let waiters = self.stepCloseWaiters
-                self.stepCloseWaiters.removeAll()
-                waiters.forEach { $0() }
+                if self.openStepCloses == 0 {
+                    let waiters = self.stepCloseWaiters
+                    self.stepCloseWaiters.removeAll()
+                    waiters.forEach { $0() }
+                }
             }
         }
     }
@@ -721,10 +800,10 @@ final class TrackingEngine: LocationProviderDelegate {
         if error == nil, let failure = sink?.failure {
             error = "\(TrackingErrorCode.storeWriteFailed): \(failure.localizedDescription)"
         }
-        let finalSteps = state == .stopped && (restoredStepsFinal ?? (lastCloseExact || !stepsEverActive))
+        let finalSteps = state == .stopped && (restoredStepsFinal ?? liveStepsFinal)
         return NativeSnapshot(
             stepsStatus: stepsStatus, restoreState: restoreState, engineChanged: engineChanged,
-            journalPending: Int64(sink?.pending ?? 0), stepsFinal: finalSteps,
+            journalPending: Int64(sink?.pending ?? 0), journalFailed: sink?.failure != nil, stepsFinal: finalSteps,
             sessionId: sessionId, state: state, segmentId: segmentId, distance: makeDistance(),
             fixCount: fixCount, lastFixTimeMs: lastFixTimeMs,
             updatedAtMs: wallMs(wallNow()), error: error)

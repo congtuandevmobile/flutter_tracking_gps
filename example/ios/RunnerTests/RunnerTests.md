@@ -5,3 +5,7 @@ Engine tests with a fake location provider, a fake step provider (with held and 
 Added: `stop` is `.finishing` (steps not final) until the exact count is in and the journal durable; the snapshot reports events not on disk; damage in the middle keeps a backup; a journal of another engine version is restored but flagged.
 
 Added: a finished session restores as stopped with its finality (exact, or provisional after a failed exact query); a late second exact answer never changes a published final result; the restore outcome is a structured field.
+
+## Recheck update
+
+Added scenarios: double stop joins one finalization, a new start supersedes an old finish (explicit failure, nothing leaks), a provisional segment is not upgraded by a later exact one, a journal write failure is never durable, a late location error after pause is ignored.

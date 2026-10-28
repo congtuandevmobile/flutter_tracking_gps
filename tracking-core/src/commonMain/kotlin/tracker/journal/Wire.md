@@ -12,3 +12,7 @@ The two primitives the journal format needs, with no platform API and no library
 | `hex8(v)` | Eight upper-case hex digits. |
 
 Used by `JournalCodec`. Tested through `JournalTest` (round trips and a flipped character).
+
+## Recheck update
+
+`escape` also escapes `,` (besides `%`, `|`, `=`, newline, carriage return) so separators in extras and ids round-trip.

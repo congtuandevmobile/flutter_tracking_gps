@@ -1,8 +1,9 @@
 /// Own GPS tracking engine for UpRace.
 ///
 /// Native code collects raw fixes (iOS CoreLocation, Android Fused location in
-/// a foreground service) and persists them; a deterministic Dart engine decides
-/// what counts as distance.
+/// a foreground service) and journals them; a shared Kotlin core (the same code
+/// on both platforms) decides what counts as distance. Dart sends commands and
+/// shows the result; its own engine is a reference and test oracle.
 library;
 
 export 'src/api/flutter_tracking_gps.dart';
