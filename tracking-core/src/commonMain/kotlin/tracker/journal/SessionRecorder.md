@@ -32,3 +32,7 @@ Not thread-safe: one serial context. Tested by `JournalTest` (`JournalReplayTest
 ## Recheck update
 
 `JournalSink.flush()` returns true only when durable. `tryStart` never throws and the engine starts BEFORE the header is written. Every tick is journaled. Pause/resume/finish are validated first: a refused one is NOT journaled and sets `lastFailure`. `markSegmentSettled` / `allStepsExact` give per-segment step finality. `lastAcceptedFixWallMs` is fixed at ingest. `restore` takes no clock, stops at the first impossible record (status CORRUPT) and pauses at the last journaled event time. No exception escapes (`guarded`).
+
+## Restore plan
+
+`plan(lines)` runs BEFORE a restore or any append: a replay on a sink that writes nothing keeps the longest prefix that is both CRC-intact and applicable. The verdict is the worst of the codec's and the replay's (a CRC-valid but impossible record is `CORRUPT`). An older header version is migrated to the current one (not for a finished, read-only journal). Native rewrites the file from `RepairPlan.lines` (backup when `keepBackup`), then restores those lines, and reports `plan.status`, never the codec's alone.

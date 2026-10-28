@@ -242,3 +242,58 @@ class CalendarTimeContractTest {
         assertEquals(-1L, r.lastAcceptedFixWallMs())
     }
 }
+
+class RestorePlanTest {
+    private fun recorded(): List<String> {
+        val sink = RSink()
+        val r = SessionRecorder.start(sink, rSettings(), "s", BASE_MS, 0, 0, 0, emptyMap())
+        for (t in 0..5) RecorderFix(r, t.toLong(), t.toDouble(), t * 3.0)
+        r.pause(ms(6.0))
+        return sink.lines
+    }
+
+    @Test fun aCrcValidButImpossibleRecordIsCorruptAndDroppedBeforeAnythingIsAppended() {
+        val lines = recorded() + JournalCodec.encode(JournalRecord.Resume(ms(7.0), 0)) // reuses segment 0
+        val plan = SessionRecorder.plan(lines)
+        assertEquals(JournalStatus.CORRUPT, plan.status)
+        assertEquals(lines.size - 1, plan.damagedLine)
+        assertEquals(lines.size - 1, plan.lines.size, "the impossible record is not kept")
+        assertTrue(plan.needsRewrite)
+        assertTrue(plan.keepBackup, "damage that drops data keeps the original")
+        // What is kept restores cleanly: nothing impossible remains.
+        assertEquals(JournalStatus.OK, SessionRecorder.restore(RSink(), plan.lines).status)
+    }
+
+    @Test fun anIntactJournalNeedsNoRewrite() {
+        val plan = SessionRecorder.plan(recorded())
+        assertEquals(JournalStatus.OK, plan.status)
+        assertFalse(plan.needsRewrite)
+        assertFalse(plan.migrated)
+    }
+
+    @Test fun aVersionOneHeaderIsMigratedBeforeVersionTwoRecordsFollow() {
+        val lines = recorded().toMutableList()
+        val h = JournalCodec.decode(lines[0]) as JournalRecord.Header
+        lines[0] = JournalCodec.encode(h.copy(version = 1, engineVersion = 1))
+        val plan = SessionRecorder.plan(lines)
+        assertTrue(plan.migrated)
+        assertTrue(plan.needsRewrite)
+        assertTrue(plan.keepBackup)
+        val header = JournalCodec.decode(plan.lines[0]) as JournalRecord.Header
+        assertEquals(JournalCodec.VERSION, header.version)
+        assertEquals(1, header.engineVersion, "the engine that recorded the old part is still reported")
+        assertTrue(SessionRecorder.restore(RSink(), plan.lines).engineChanged)
+    }
+
+    @Test fun aFinishedVersionOneJournalStaysReadOnlyAndIsNotMigrated() {
+        val sink = RSink()
+        val r = SessionRecorder.start(sink, rSettings(), "s", BASE_MS, 0, 0, 0, emptyMap())
+        for (t in 0..3) RecorderFix(r, t.toLong(), t.toDouble(), t * 3.0)
+        r.finish(ms(4.0))
+        val lines = sink.lines.toMutableList()
+        lines[0] = JournalCodec.encode((JournalCodec.decode(lines[0]) as JournalRecord.Header).copy(version = 1))
+        val plan = SessionRecorder.plan(lines)
+        assertFalse(plan.migrated)
+        assertFalse(plan.needsRewrite)
+    }
+}

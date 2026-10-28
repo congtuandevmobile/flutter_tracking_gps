@@ -38,6 +38,29 @@ class RestoreResult(
     val stepsFinal: Boolean = false,
 )
 
+/**
+ * What a restore must do to a journal BEFORE anything is appended to it (see [SessionRecorder.plan]).
+ * [lines] is the trusted, replayable prefix (migrated header included): rewrite the file with it when
+ * [needsRewrite], keep a `.corrupt` copy when [keepBackup], and only then open the writer and restore.
+ */
+class RepairPlan(
+    /** The lines to keep: every one is CRC-valid AND applies in the engine. Empty when [usable] is false. */
+    val lines: List<String>,
+    /** The verdict of the whole check, codec AND replay (a CRC-valid but impossible record is `CORRUPT`). */
+    val status: JournalStatus,
+    /** Zero-based index of the first record that was dropped, or -1. */
+    val damagedLine: Int,
+    /** The header was written by an older format and is rewritten as the current one (new records need it). */
+    val migrated: Boolean,
+    val usable: Boolean,
+) {
+    /** The file on disk must be replaced by [lines] before the writer is opened. */
+    val needsRewrite: Boolean get() = usable && (status != JournalStatus.OK || migrated)
+
+    /** Damage in the middle, or a migration, drops or changes data: keep the original next to the new file. */
+    val keepBackup: Boolean get() = usable && ((status != JournalStatus.OK && status != JournalStatus.TRUNCATED_TAIL) || migrated)
+}
+
 /** A start that cannot throw across the platform boundary (Kotlin exceptions are not catchable from Swift). */
 class StartResult(val recorder: SessionRecorder?, val error: String?)
 
@@ -322,6 +345,36 @@ class SessionRecorder private constructor(
                 header.extras, header.engineVersion, header.engineVersion != JournalCodec.ENGINE_VERSION,
                 finished = s.state == STATE_FINISHED, stepsFinal = recorder.stepsFinal,
             )
+        }
+
+        /**
+         * Checks a journal BEFORE it is restored or appended to: runs the replay on a sink that writes nothing and
+         * keeps the longest prefix that is both intact (CRC) and applicable (the engine accepts every record).
+         * The status is the WORST of the codec's and the replay's, so a CRC-valid record that cannot be applied
+         * (for example a resume that reuses a segment) is `CORRUPT` here, and nothing is ever appended after it.
+         * An older header version is migrated to the current one, because records of the current format must
+         * never follow an older header (an old reader would take them for damage instead of refusing the file).
+         * A FINISHED journal is read-only and is not migrated.
+         */
+        fun plan(lines: List<String>): RepairPlan {
+            val contents = JournalCodec.read(lines)
+            val header = contents.records.firstOrNull() as? JournalRecord.Header
+                ?: return RepairPlan(emptyList(), contents.status, contents.damagedLine, false, false)
+            val nonBlank = lines.filter { it.isNotBlank() }
+            val probe = restore(object : JournalSink {
+                override fun append(line: String) {}
+                override fun flush(): Boolean = true
+            }, lines)
+            if (probe.recorder == null) return RepairPlan(emptyList(), probe.status, probe.damagedLine, false, false)
+            // The replay stopped EARLIER than the codec's reading only when a CRC-valid record was impossible.
+            val semantic = probe.damagedLine != contents.damagedLine
+            val kept = if (semantic) probe.damagedLine else contents.records.size
+            val keptLines = nonBlank.take(kept).toMutableList()
+            val migrated = header.version < JournalCodec.VERSION && !probe.finished
+            if (migrated) keptLines[0] = JournalCodec.encode(header.copy(version = JournalCodec.VERSION))
+            val status = if (semantic) JournalStatus.CORRUPT else contents.status
+            val damaged = if (semantic) probe.damagedLine else contents.damagedLine
+            return RepairPlan(keptLines, status, damaged, migrated, true)
         }
 
         /**

@@ -40,3 +40,5 @@ A journal that ended at `Finish` restores as `STOPPED` (read-only, with the fina
 ## Recheck update
 
 `journalFailed` comes from the sink; `lastAcceptedFixAtMs` comes from the recorder (fixed at ingest, not recomputed from now); `clearSession` runs under the command lock and drops its references only after the store cleared; `stop` releases the writer after the flush.
+
+`restore` uses `SessionRecorder.plan`: the restore state and error come from the plan's status, the file is rewritten (with a `.corrupt` backup when data is dropped or the header migrated) before the writer opens.

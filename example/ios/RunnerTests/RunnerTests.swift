@@ -810,4 +810,48 @@ final class RunnerTests: XCTestCase {
         drain(engine)
         XCTAssertEqual(engine.snapshot().state, .paused, "a late location error must not turn a paused session into an error")
     }
+
+    // MARK: - The core decides what a restore may trust (recheck: semantic corruption, old header)
+
+    func testACrcValidButImpossibleRecordIsPartialAndRemovedBeforeAppending() throws {
+        let store = MemoryStore()
+        let provider = FakeProvider(clock: clock)
+        let first = makeEngine(provider, store)
+        let _: NativeSnapshot = try run { first.start(config: config(), completion: $0) }
+        runFixes(provider, seconds: 5)
+        let _: NativeSnapshot = try run { first.pause(sessionId: "s", completion: $0) }
+        let good = (store.files["s"] ?? []).count
+        // CRC-valid, but a resume that reuses segment 0 can never be applied.
+        store.files["s", default: []].append(JournalCodec.shared.encode(r: JournalRecord.Resume(atMs: clock.mono + 9_000, segmentId: 0)))
+
+        let second = makeEngine(FakeProvider(clock: clock), store)
+        let restored: NativeSnapshot = try run { second.restore(config: config(), completion: $0) }
+        XCTAssertEqual(restored.restoreState, .partial)
+        XCTAssertTrue(restored.error?.hasPrefix(TrackingErrorCode.journalCorrupt) == true, restored.error ?? "nil")
+        XCTAssertEqual((store.files["s"] ?? []).count, good, "appends continue from a replayable prefix")
+        XCTAssertEqual(store.backups, 1, "the original is kept")
+    }
+
+    func testAVersionOneHeaderIsMigratedBeforeItIsAppendedTo() throws {
+        let store = MemoryStore()
+        let provider = FakeProvider(clock: clock)
+        let first = makeEngine(provider, store)
+        let _: NativeSnapshot = try run { first.start(config: config(), completion: $0) }
+        runFixes(provider, seconds: 5)
+        let _: NativeSnapshot = try run { first.pause(sessionId: "s", completion: $0) }
+        var lines = store.files["s"] ?? []
+        let h = try XCTUnwrap(JournalCodec.shared.decode(line: lines[0]) as? JournalRecord.Header)
+        let old = JournalRecord.Header(
+            version: 1, engineVersion: 1, sessionId: h.sessionId, atMs: h.atMs, wallAtMs: h.wallAtMs,
+            segmentId: h.segmentId, initialSteps: h.initialSteps, settings: h.settings, extras: h.extras)
+        lines[0] = JournalCodec.shared.encode(r: old)
+        store.files["s"] = lines
+
+        let second = makeEngine(FakeProvider(clock: clock), store)
+        let restored: NativeSnapshot = try run { second.restore(config: config(), completion: $0) }
+        XCTAssertTrue(restored.engineChanged, "the old part was recorded by another engine: still reported")
+        let migrated = try XCTUnwrap(JournalCodec.shared.decode(line: (store.files["s"] ?? [])[0]) as? JournalRecord.Header)
+        XCTAssertEqual(migrated.version, JournalCodec.shared.VERSION)
+        XCTAssertEqual(store.backups, 1)
+    }
 }

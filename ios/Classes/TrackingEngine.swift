@@ -423,20 +423,20 @@ final class TrackingEngine: LocationProviderDelegate {
                 self.stopTicker()
                 self.endSteps()
                 if self.state == .running { self.provider.stopUpdates() }
-                let contents = JournalCodec.shared.read(lines: lines)
-                guard let header = contents.records.first as? JournalRecord.Header else {
+                // The core decides what is trustworthy: intact (CRC) AND applicable. Nothing is appended before the repair.
+                let plan = SessionRecorder.Companion.shared.plan(lines: lines)
+                guard plan.usable else {
                     self.deliver(
                         .failure(trackingError(
                             code: TrackingErrorCode.restoreFailed,
-                            message: "no usable journal for this session (\(contents.status))")),
+                            message: "no usable journal for this session (\(plan.status))")),
                         to: completion)
                     return
                 }
-                let usable = Array(lines.filter { !$0.isEmpty }.prefix(contents.records.count))
-                if contents.status != .ok {
-                    // Only a damaged LAST record is a normal crash artefact; damage in the middle drops
-                    // everything after it, so the original is kept next to the repaired file.
-                    do { try self.store.rewrite(config.sessionId, lines: usable, keepBackup: contents.status != .truncatedTail) } catch {
+                let usable = plan.lines
+                if plan.needsRewrite {
+                    // Damage in the middle (or an old-format header) changes what the file holds: keep the original beside it.
+                    do { try self.store.rewrite(config.sessionId, lines: usable, keepBackup: plan.keepBackup) } catch {
                         self.deliver(
                             .failure(trackingError(
                                 code: TrackingErrorCode.restoreFailed, message: "could not repair the journal",
@@ -463,7 +463,7 @@ final class TrackingEngine: LocationProviderDelegate {
                 self.fixCount = Int64(result.fixCount)
                 self.lastFixTimeMs = result.lastFixWallMs >= 0 ? result.lastFixWallMs : nil
                 self.extras = result.extras
-                self.adaptive = header.settings.adaptiveSampling
+                self.adaptive = (JournalCodec.shared.decode(line: usable[0]) as? JournalRecord.Header)?.settings.adaptiveSampling ?? false
                 self.stepsEnabled = result.extras["stepsEnabled"] == "true"
                 self.stepsStatus = .off
                 self.stepsEverActive = false
@@ -472,15 +472,15 @@ final class TrackingEngine: LocationProviderDelegate {
                 if result.engineChanged {
                     self.lastError = "\(TrackingErrorCode.engineChanged): the journal was recorded with engine \(result.engineVersion); the replay may differ from what was shown live"
                 }
-                switch contents.status {
+                switch plan.status {
                 case .ok: if !result.engineChanged { self.lastError = nil }
                 case .truncatedTail:
                     self.lastError = "\(TrackingErrorCode.journalRepaired): the last record was incomplete and was dropped"
                 default:
-                    self.lastError = "\(TrackingErrorCode.journalCorrupt): damage at line \(contents.damagedLine); only the intact part was restored"
+                    self.lastError = "\(TrackingErrorCode.journalCorrupt): damage at line \(plan.damagedLine); only the intact part was restored"
                 }
                 self.engineChanged = result.engineChanged
-                switch contents.status {
+                switch plan.status {
                 case .ok: self.restoreState = .complete
                 case .truncatedTail: self.restoreState = .tailRepaired
                 default: self.restoreState = .partial

@@ -33,3 +33,5 @@ A journal that ended at `Finish` restores as `.stopped` (read-only, with the fin
 ## Recheck update
 
 Each finish is a `FinishOperation` bound to the session token: a second `stop` joins it; a start/restore replaces it and the old stop fails with `SUPERSEDED`; the token is re-checked after the journal flush. Step closes are counted per session (an old answer never touches the new counts) and journaled per segment (`markSegmentSettled`); finality is `allStepsExact()`. Step callbacks use the injected clocks; a location error outside `running` is ignored; `requestPermission` waiters are released after 120 s with the current status. Snapshot carries `journalFailed`.
+
+`restore` uses `SessionRecorder.plan` exactly like Android: restore state and error come from the plan's status; the repaired/migrated file is written before the writer opens.

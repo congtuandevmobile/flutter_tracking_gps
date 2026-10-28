@@ -622,3 +622,48 @@ class AuditNativeProbeTest {
         } finally {sink.close();parent.delete()}
     }
 }
+
+@OptIn(ExperimentalCoroutinesApi::class)
+class RestorePlanNativeTest {
+    private var clock = MONO
+
+    private fun engine(store: MemoryJournalStore, scope: CoroutineScope) = TrackingEngine(
+        FakeSource(), store, scope, wallClockMs = { BASE + (clock - MONO) }, monotonicMs = { clock },
+    )
+
+    @Test fun aCrcValidButImpossibleRecordIsReportedPartialAndRemovedBeforeAppending() = runTest {
+        val store = MemoryJournalStore()
+        val source = FakeSource()
+        val first = TrackingEngine(source, store, CoroutineScope(backgroundScope.coroutineContext + UnconfinedTestDispatcher(testScheduler)),
+            wallClockMs = { BASE + (clock - MONO) }, monotonicMs = { clock })
+        first.start(startConfig())
+        for (i in 0..5) { clock = MONO + i * 1000L; source.push(loc(i.toDouble(), i * 3.0, speed = 3.0)) }
+        first.pause("s")
+        val good = store.read("s").size
+        store.files["s"]!!.add(JournalCodec.encode(JournalRecord.Resume(MONO + 9_000, 0))) // reuses segment 0
+        val second = engine(store, CoroutineScope(backgroundScope.coroutineContext + UnconfinedTestDispatcher(testScheduler)))
+        val restored = second.restore(startConfig())
+        assertEquals(NativeRestoreState.PARTIAL, restored.restoreState)
+        assertTrue(restored.error?.startsWith("JOURNAL_CORRUPT") == true, restored.error ?: "nil")
+        assertEquals(good, store.read("s").size, "the impossible record is gone: appends continue from a replayable prefix")
+        assertEquals(1, store.backups, "the original is kept")
+    }
+
+    @Test fun aVersionOneJournalIsMigratedBeforeItIsAppendedTo() = runTest {
+        val store = MemoryJournalStore()
+        val source = FakeSource()
+        val first = TrackingEngine(source, store, CoroutineScope(backgroundScope.coroutineContext + UnconfinedTestDispatcher(testScheduler)),
+            wallClockMs = { BASE + (clock - MONO) }, monotonicMs = { clock })
+        first.start(startConfig())
+        for (i in 0..5) { clock = MONO + i * 1000L; source.push(loc(i.toDouble(), i * 3.0, speed = 3.0)) }
+        first.pause("s")
+        val lines = store.files["s"]!!
+        lines[0] = JournalCodec.encode((JournalCodec.decode(lines[0]) as JournalRecord.Header).copy(version = 1, engineVersion = 1))
+        val second = engine(store, CoroutineScope(backgroundScope.coroutineContext + UnconfinedTestDispatcher(testScheduler)))
+        val restored = second.restore(startConfig())
+        assertTrue(restored.engineChanged, "the old part was recorded by another engine: still reported")
+        val header = JournalCodec.decode(store.read("s")[0]) as JournalRecord.Header
+        assertEquals(JournalCodec.VERSION, header.version)
+        assertEquals(1, store.backups)
+    }
+}

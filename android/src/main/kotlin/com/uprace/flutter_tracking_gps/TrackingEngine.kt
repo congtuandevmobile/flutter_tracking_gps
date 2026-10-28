@@ -255,17 +255,14 @@ internal class TrackingEngine(
         if (config.sessionId == sessionId && running) return@withLock snapshot()
         haltJobs()
         val lines = withContext(Dispatchers.IO) { store.read(config.sessionId) }
-        val contents = JournalCodec.read(lines)
-        if (contents.records.isEmpty() || contents.records.first() !is JournalRecord.Header) {
-            throw IOException("no usable journal for this session (${contents.status})")
+        // The core decides what is trustworthy: intact (CRC) AND applicable. Nothing is appended before the repair.
+        val plan = SessionRecorder.plan(lines)
+        if (!plan.usable) throw IOException("no usable journal for this session (${plan.status})")
+        if (plan.needsRewrite) {
+            // Damage in the middle (or an old-format header) changes what the file holds: keep the original beside it.
+            withContext(Dispatchers.IO) { store.rewrite(config.sessionId, plan.lines, plan.keepBackup) }
         }
-        val usable = lines.filter { it.isNotBlank() }.take(contents.records.size)
-        if (contents.status != JournalStatus.OK) {
-            // Only a damaged LAST record is a normal crash artefact; damage in the middle drops
-            // everything after it, so the original is kept next to the repaired file.
-            val keepOriginal = contents.status != JournalStatus.TRUNCATED_TAIL
-            withContext(Dispatchers.IO) { store.rewrite(config.sessionId, usable, keepOriginal) }
-        }
+        val usable = plan.lines
         val newSink = store.open(config.sessionId)
         val result = SessionRecorder.restore(newSink, usable)
         val rec = result.recorder ?: throw IOException("journal replay failed (${result.status})")
@@ -278,7 +275,7 @@ internal class TrackingEngine(
             fixCount = result.fixCount.toLong()
             lastFixTimeMs = if (result.lastFixWallMs >= 0) result.lastFixWallMs else null
             extras = result.extras
-            adaptive = settingsAdaptive(contents)
+            adaptive = settingsAdaptive(usable)
             stepsEnabled = result.extras["stepsEnabled"] == "true"
             stepsStatus = NativeStepsStatus.OFF
             val interval = result.extras["intervalMs"]?.toLongOrNull() ?: config.intervalMs
@@ -288,13 +285,13 @@ internal class TrackingEngine(
                 "${TrackingErrorCode.ENGINE_CHANGED}: the journal was recorded with engine ${result.engineVersion}; " +
                     "the replay may differ from what was shown live"
             } else null
-            lastError = lastError ?: when (contents.status) {
+            lastError = lastError ?: when (plan.status) {
                 JournalStatus.OK -> null
                 JournalStatus.TRUNCATED_TAIL -> "${TrackingErrorCode.JOURNAL_REPAIRED}: the last record was incomplete and was dropped"
-                else -> "${TrackingErrorCode.JOURNAL_CORRUPT}: damage at line ${contents.damagedLine}; only the intact part was restored"
+                else -> "${TrackingErrorCode.JOURNAL_CORRUPT}: damage at line ${plan.damagedLine}; only the intact part was restored"
             }
             engineChanged = result.engineChanged
-            restoreState = when (contents.status) {
+            restoreState = when (plan.status) {
                 JournalStatus.OK -> NativeRestoreState.COMPLETE
                 JournalStatus.TRUNCATED_TAIL -> NativeRestoreState.TAIL_REPAIRED
                 else -> NativeRestoreState.PARTIAL
@@ -350,8 +347,8 @@ internal class TrackingEngine(
 
     // ── Internals ───────────────────────────────────────────────────────────
 
-    private fun settingsAdaptive(contents: tracker.journal.JournalContents): Boolean =
-        (contents.records.first() as JournalRecord.Header).settings.adaptiveSampling
+    private fun settingsAdaptive(lines: List<String>): Boolean =
+        (JournalCodec.decode(lines.first()) as JournalRecord.Header).settings.adaptiveSampling
 
     /**
      * Retires every callback of the current generation, then waits for the jobs to

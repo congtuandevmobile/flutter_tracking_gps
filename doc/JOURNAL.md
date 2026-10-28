@@ -126,3 +126,16 @@ A line whose write or sync failed stays pending for good (`journalPending`), and
 sticky (`journalFailed`): a failure can never look like "everything is saved". `rewrite` replaces
 the file atomically (temp file, sync, atomic swap), keeping `<name>.corrupt` when damage was in the
 middle.
+
+
+## Restore: repair and migrate before appending
+
+A restore first asks the core for a plan (`SessionRecorder.plan`). The kept lines are the longest
+prefix that is intact AND applicable; a record with a valid CRC that the engine cannot apply (for
+example a resume that reuses a segment) makes the status `CORRUPT` (`PARTIAL` in the snapshot)
+and is removed, with a `.corrupt` copy of the original, before anything is appended. A journal
+with an older header version is migrated to the current version (atomic rewrite, backup kept)
+before new records follow it; the header's `engineVersion` is left as recorded, so
+`engineChanged` keeps saying that the old part came from another engine. A finished journal is
+read-only and is not migrated.
+

@@ -23,6 +23,10 @@ starting value.
 * **Dart:** snapshots are compared field by field (nothing can be forgotten); a closed presenter
   dispatcher never calls the presenter; a `TrackingSession` records once; `finish` fails unless
   native answered `stopped`.
+* **Restore:** the core's `plan` decides the trusted prefix (CRC and replay); an impossible
+  record is `PARTIAL` and removed before appending, and an old-format header is migrated
+  atomically (backup kept) before new records follow it.
+* **Foreground handshake:** overlapping requests all complete; only the newest may stop the service.
 * **Release:** the workflow runs on macOS, gates analyze/tests/core tests/example build, builds
   and verifies the XCFramework, and `ios/.pubignore` ships it in the package.
 
@@ -140,8 +144,8 @@ join a gap already credited, a watch producer is designed for but not built.
 
 ### Tests
 
-173 shared-core (incl. exact journal replay, finished-session restore, reboot, engine
+177 shared-core (incl. exact journal replay, finished-session restore, reboot, engine
 version, reprocess, drift limits, step accounting, the encoding/tick/finality contracts; a
-ten-hour replay measured at ~0.2 s), 47 Android (31 engine + 3 audit probes, 9 file store,
-4 foreground handshake), 39 iOS engine and 87 Dart tests pass; 11 CSV fixtures
+ten-hour replay measured at ~0.2 s), 52 Android (31 engine + 2 restore plan + 3 audit probes, 9 file store,
+7 foreground handshake), 41 iOS engine and 87 Dart tests pass; 11 CSV fixtures
 agree on both engines. No device test: see `doc/DEVICE_TESTS.md`.

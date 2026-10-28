@@ -37,4 +37,32 @@ class ForegroundHandshakeTest {
         h.acknowledge()
         assertFalse(h.await(h.expect(), 1_000))
     }
+
+    @Test fun anAcknowledgementSatisfiesEveryOverlappingRequest() = runTest {
+        val h = ForegroundHandshake()
+        val a = h.expect()
+        val b = h.expect()
+        h.acknowledge()
+        assertTrue(h.await(a, 1_000), "the older request is not abandoned")
+        assertTrue(h.await(b, 1_000))
+    }
+
+    @Test fun aFailureFailsEveryOverlappingRequest() = runTest {
+        val h = ForegroundHandshake()
+        val a = h.expect()
+        val b = h.expect()
+        h.fail(IllegalStateException("refused"))
+        assertFailsWith<IllegalStateException> { h.await(a, 1_000) }
+        assertFailsWith<IllegalStateException> { h.await(b, 1_000) }
+    }
+
+    @Test fun onlyTheNewestRequestMayStopTheService() = runTest {
+        val h = ForegroundHandshake()
+        val a = h.expect()
+        val b = h.expect()
+        assertFalse(h.isCurrent(a), "an older request timing out must not stop the service")
+        assertTrue(h.isCurrent(b))
+        assertFalse(h.await(a, 10))
+        assertTrue(h.isCurrent(b), "the older request's cleanup did not disturb the newer one")
+    }
 }

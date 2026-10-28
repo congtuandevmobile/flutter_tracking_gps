@@ -373,21 +373,26 @@ class FlutterTrackingGpsPlugin :
         ContextCompat.startForegroundService(context, intent)
     }
 
-    /** Starts the service and returns only after it reached `startForeground`; otherwise stops it and throws. */
+    /**
+     * Starts the service and returns only after it reached `startForeground`; otherwise throws. The cleanup
+     * stops the service only when this request is still the newest one: an older request timing out must
+     * never stop a service a newer request is using.
+     */
     private suspend fun startForegroundAndWait(context: Context, title: String, text: String) {
-        val wait = TrackingService.handshake.expect()
+        val handshake = TrackingService.handshake
+        val wait = handshake.expect()
         val ready = try {
             startService(context, title, text)
-            TrackingService.handshake.await(wait, FOREGROUND_READY_TIMEOUT_MS)
+            handshake.await(wait, FOREGROUND_READY_TIMEOUT_MS)
         } catch (e: CancellationException) {
-            stopService(context)
+            if (handshake.isCurrent(wait)) stopService(context)
             throw e
         } catch (e: Exception) {
-            stopService(context)
+            if (handshake.isCurrent(wait)) stopService(context)
             throw e.toFlutterError(TrackingErrorCode.FOREGROUND_START_FAILED, "could not start the foreground service; recording did not start")
         }
         if (!ready) {
-            stopService(context)
+            if (handshake.isCurrent(wait)) stopService(context)
             throw flutterError(TrackingErrorCode.FOREGROUND_START_FAILED, "the foreground service did not start in time; recording did not start")
         }
     }
