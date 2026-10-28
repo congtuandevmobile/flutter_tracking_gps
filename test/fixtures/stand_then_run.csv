@@ -1,0 +1,15 @@
+# Ten seconds standing (Doppler 0, the anchor stays put), then 6 m of real movement
+# with GPS present the whole time: that is NOT a gap, the 6 m count.
+fix,0,0,0,0,5,0
+fix,1,0,1,0,5,0
+fix,2,0,2,0,5,0
+fix,3,0,3,0,5,0
+fix,4,0,4,0,5,0
+fix,5,0,5,0,5,0
+fix,6,0,6,0,5,0
+fix,7,0,7,0,5,0
+fix,8,0,8,0,5,0
+fix,9,0,9,0,5,0
+fix,10,0,10,0,5,0
+fix,11,0,11,6,5,3
+expect,6,0.2

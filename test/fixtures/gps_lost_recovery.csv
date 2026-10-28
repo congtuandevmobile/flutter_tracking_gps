@@ -1,0 +1,7 @@
+# Anchor, tunnel (GPS silent), 100 m of steps, GPS returns 90 m ahead: the
+# straight line confirms the estimate; the gap is credited once (not 100 + 80).
+fix,0,0,0,0,5,
+tick,15
+pdr,40,100
+fix,1,0,60,90,5,
+expect,100,0.5

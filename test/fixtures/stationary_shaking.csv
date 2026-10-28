@@ -1,0 +1,7 @@
+# Anchor, GPS goes silent, the phone is shaken (130 m of "steps" submitted), GPS
+# returns at the same place: nothing confirms the steps, so 0 m.
+fix,0,0,0,0,5,
+tick,15
+pdr,30,130
+fix,1,0,100,1,5,
+expect,0,0.01

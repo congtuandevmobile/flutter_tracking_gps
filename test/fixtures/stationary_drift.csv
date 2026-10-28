@@ -1,0 +1,7 @@
+# The phone sits still: positions wander 6 m a second but the Doppler speed says
+# 0.1 m/s, so nothing counts.
+fix,0,0,0,0,5,0
+fix,1,0,1,6,5,0.1
+fix,2,0,2,-4,5,0.1
+fix,3,0,3,7,5,0.1
+expect,0,0.01

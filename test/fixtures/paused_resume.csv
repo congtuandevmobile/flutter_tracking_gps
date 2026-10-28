@@ -1,0 +1,7 @@
+# 5 m, pause, resume far away: the first fix of the new segment only anchors.
+fix,0,0,0,0,5,
+fix,1,0,1,5,5,4
+pause,2
+resume,600,1
+fix,0,1,601,5000,5,
+expect,5,0.1

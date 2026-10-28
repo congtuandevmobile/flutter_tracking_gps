@@ -1,0 +1,6 @@
+# A 500 m jump in one second is rejected; the next normal fix is measured from
+# the original anchor.
+fix,0,0,0,0,5,
+fix,1,0,1,500,5,3
+fix,2,0,2,6,5,3
+expect,6,0.1

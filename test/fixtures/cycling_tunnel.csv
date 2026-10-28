@@ -1,0 +1,8 @@
+# Cyclist: 200 m of good GPS, 16 s tunnel with no steps (cycling has none), the
+# straight line across the gap (140 m, 14 m/s ok) is bridged minus its
+# uncertainty (5 + 5 m).
+fix,0,0,0,0,5,12
+fix,1,0,1,12,5,12
+tick,15
+fix,2,0,17,152,5,12
+expect,142,0.5
