@@ -107,20 +107,26 @@ jobs:
             $0 == ver { flag=1; next }
             /^## v/ && flag { exit }
             flag
-          ' CHANGELOG.md > release.md
+          ' CHANGELOG.md > "$RUNNER_TEMP/release.md"
 
           echo "📄 Release notes:"
-          cat release.md
+          cat "$RUNNER_TEMP/release.md"
+
+      # The build/analyze steps above may rewrite checked-in files (CocoaPods and Xcode project migrations).
+      # The checkout equals the released commit, so restoring them is safe, and pub then sees a clean tree
+      # (a dirty tree is a validation WARNING, and a warning fails the dry run). Ignored files, such as
+      # the XCFramework built above, are untouched.
+      - name: Restore checked-in files changed by the build steps
+        run: git checkout -- .
 
       - name: Validate package (dry run)
-        run: flutter pub publish --dry-run
+        run: |
+          set -o pipefail
+          flutter pub publish --dry-run 2>&1 | tee "$RUNNER_TEMP/dryrun.txt"
 
       - name: Verify the XCFramework is inside the package
         run: |
-          set -e
-          # The package archive is what users get: the framework must be in it (it is git-ignored, ios/.pubignore re-includes it).
-          flutter pub publish --dry-run 2>&1 | tee dryrun.txt
-          grep -q "TrackingCore.xcframework" dryrun.txt || { echo "❌ TrackingCore.xcframework is not part of the package"; exit 1; }
+          grep -q "TrackingCore.xcframework" "$RUNNER_TEMP/dryrun.txt" || { echo "❌ TrackingCore.xcframework is not part of the package"; exit 1; }
 
       - name: Write pub credentials
         run: |
@@ -145,5 +151,5 @@ jobs:
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: Release ${{ steps.version.outputs.tag }}
-          body_path: release.md
+          body_path: ${{ runner.temp }}/release.md
           prerelease: ${{ steps.version.outputs.is_prerelease }}
