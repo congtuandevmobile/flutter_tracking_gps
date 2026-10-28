@@ -112,6 +112,16 @@ class StepSessionTest {
         assertEquals(39, s.total)
     }
 
+    @Test fun closingAnAlreadyClosedSegmentKeepsTheExactCorrectionValid() {
+        // iOS: pause, then finish while the OS query is still pending, then the exact count arrives.
+        val s = StepSession().also { it.openSegment() }
+        s.onSegmentCount(30)
+        s.closeSegment() // pause
+        s.closeSegment() // finish from paused: must not forget the 30
+        assertEquals(4, s.correctClosedSegment(34))
+        assertEquals(34, s.total)
+    }
+
     @Test fun restoredTotalIsNotAddedToTheDeviceCounter() {
         val s = StepSession().also { it.reset(initialSteps = 500); it.openSegment() }
         assertEquals(0, s.onCounter(88_000))

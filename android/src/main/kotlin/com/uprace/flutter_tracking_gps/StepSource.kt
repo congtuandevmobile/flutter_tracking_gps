@@ -9,7 +9,7 @@ import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.os.Build
 import android.os.Handler
-import android.os.HandlerThread
+import android.os.Looper
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.awaitClose
@@ -46,7 +46,7 @@ internal object NoStepSource : StepSource {
 }
 
 /**
- * `TYPE_STEP_COUNTER`, delivered on its own handler thread without batching.
+ * `TYPE_STEP_COUNTER`, delivered on the main looper without batching (the callback only queues the reading).
  * AOSP stamps a reading with the time of its LAST step and may report up to
  * ~10 s late, so a step taken just before a pause can be lost when the listener
  * is unregistered, and the steps before the first reading of a segment are
@@ -76,7 +76,6 @@ internal class SensorStepSource(context: Context) : StepSource {
             close(IllegalStateException("no step counter on this device"))
             return@callbackFlow
         }
-        val thread = HandlerThread("uprace-tracking-steps").also { it.start() }
         val listener = object : SensorEventListener {
             override fun onSensorChanged(event: SensorEvent) {
                 trySend(StepSample(event.values[0].toLong(), event.timestamp / 1_000_000L))
@@ -84,22 +83,22 @@ internal class SensorStepSource(context: Context) : StepSource {
 
             override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
         }
+        // The callback only queues the reading (the counter reports every few
+        // seconds), so the main looper is enough, like the location updates; all
+        // processing happens in the engine's coroutine, off the main thread.
         val registered = try {
-            sensorManager.registerListener(listener, sensor, SensorManager.SENSOR_DELAY_NORMAL, 0, Handler(thread.looper))
+            sensorManager.registerListener(
+                listener, sensor, SensorManager.SENSOR_DELAY_NORMAL, 0, Handler(Looper.getMainLooper()),
+            )
         } catch (e: SecurityException) {
-            thread.quitSafely()
             close(e)
             return@callbackFlow
         }
         if (!registered) {
-            thread.quitSafely()
             close(IllegalStateException("could not register the step counter"))
             return@callbackFlow
         }
-        awaitClose {
-            sensorManager.unregisterListener(listener)
-            thread.quitSafely()
-        }
+        awaitClose { sensorManager.unregisterListener(listener) }
         // Never drop a reading: the counter is cumulative, but a lost reading would delay the estimate.
     }.buffer(Channel.UNLIMITED)
 }

@@ -1,7 +1,7 @@
 ## 0.1.0
 
 * **Steps in the engine (B + C).** Native sensors (Android `TYPE_STEP_COUNTER`, iOS
-  `CMPedometer`, ported from `uprace_steps_counter`) feed the shared core. The core
+  `CMPedometer`) feed the shared core. The core
   owns the accounting (`StepSession`) and the metres (`StrideEstimator`): the stride
   is learned from good GPS and, while GPS is weak, steps become a **pending**
   estimate the returning GPS must confirm (same `GapReconciler`, one source per

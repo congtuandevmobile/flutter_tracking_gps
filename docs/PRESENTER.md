@@ -43,70 +43,40 @@ abstract class TrackingPresenter {
 ### `ownsAndroidForegroundService`
 
 Return `true` when the presenter's plugin owns a foreground service of type
-`location` (as `uprace_live_activity`'s `LiveActivityService` does). The SDK then
+`location`. The SDK then
 starts **no** foreground service or notification of its own, so the user sees one
 notification, not two. The recording then depends on the presenter's service to
 keep the process alive: if the presenter fails to start it, **nothing keeps the
 process alive**. Leave it `false` (default) when unsure.
 
-## Example adapter for `uprace_live_activity`
+## Example adapter
 
-Not compiled by this package (it has no dependency on `uprace_live_activity`);
-copy it into the app.
+A skeleton: replace the `MyLiveActivity` calls with the plugin the app uses.
+Not compiled by this package.
 
 ```dart
-class UpraceLiveActivityPresenter extends TrackingPresenter {
-  UpraceLiveActivityPresenter({this.locale = 'vi', this.activityType = 'running'});
-  final String locale;
-  final String activityType;
-  final _live = UpraceLiveActivity();
-  String? _id;
-  late final int _startMs;
+class MyPresenter extends TrackingPresenter {
+  final _surface = MyLiveActivity(); // the third-party plugin
 
   @override
-  bool get ownsAndroidForegroundService => true; // its LiveActivityService is type location
-
-  LiveActivityData _data(TrackingSnapshot s, String status) => LiveActivityData()
-    ..activityType = activityType
-    ..startTimestamp = _startMs
-    ..elapsedSeconds = s.movingTime.inSeconds
-    ..distanceMeters = s.totalMeters
-    ..paceSecondsPerKm = (s.speedMps ?? 0) > 0.3 ? 1000 / s.speedMps! : 0
-    ..steps = s.steps
-    ..status = status;
+  bool get ownsAndroidForegroundService => false; // true only if that plugin holds a location foreground service
 
   @override
-  Future<void> onStart(TrackingSnapshot s) async {
-    _startMs = DateTime.now().millisecondsSinceEpoch;
-    final r = await _live.startActivity(_data(s, 'active'), locale: locale);
-    _id = r.activityId;
-  }
+  Future<void> onStart(TrackingSnapshot s) => _surface.start(distance: s.totalMeters);
 
   @override
-  Future<void> onUpdate(TrackingSnapshot s) async {
-    final id = _id;
-    if (id != null) await _live.updateActivity(id, _data(s, s.state == RecordingState.paused ? 'paused' : 'active'));
-  }
+  Future<void> onUpdate(TrackingSnapshot s) => _surface.update(
+        distance: s.totalMeters,
+        paused: s.state == RecordingState.paused,
+      );
 
   @override
-  Future<void> onPause(TrackingSnapshot s) => onUpdate(s);
-  @override
-  Future<void> onResume(TrackingSnapshot s) => onUpdate(s);
-
-  @override
-  Future<void> onFinish(TrackingSnapshot s) async {
-    final id = _id;
-    if (id != null) await _live.endActivity(id);
-  }
+  Future<void> onFinish(TrackingSnapshot s) => _surface.end();
 }
 ```
 
-Notes for that plugin (from its own README): on iOS the host app needs a Widget
-Extension target with `UpraceLiveActivityWidget.swift`, `NSSupportsLiveActivities`
-in `Info.plist` and the `group.vn.vng.uprace` App Group; on Android it needs the
-runtime notification permission. `elapsedSeconds` above is the engine's moving
-time; the plugin's chronometer fields (`startTimestamp`, `activeStartTimestamp`)
-are the app's to keep consistent with its own clock.
+An iOS Live Activity needs a Widget Extension target in the host app; that setup
+belongs to the plugin that provides it.
 
 ## Why Dart-side and not native-side?
 

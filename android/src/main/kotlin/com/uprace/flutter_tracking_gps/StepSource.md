@@ -11,7 +11,7 @@ Where step readings come from, behind an interface so `TrackingEngine` can be te
 | `StepSample(raw, elapsedMs)` | One reading of the device's cumulative counter and its sensor time on the monotonic clock. |
 | `StepSource` | `status(): NativeStepsStatus` (hardware + permission) and `counts(): Flow<StepSample>` (cold: collecting registers the sensor, cancelling unregisters it, so steps taken while no collector exists are never read). |
 | `NoStepSource` | Steps off: status `OFF`, empty flow. |
-| `SensorStepSource(context)` | `TYPE_STEP_COUNTER`, `SENSOR_DELAY_NORMAL`, no batching, own `HandlerThread` released in `awaitClose`. Unbounded buffer: a reading is never dropped. |
+| `SensorStepSource(context)` | `TYPE_STEP_COUNTER`, `SENSOR_DELAY_NORMAL`, no batching, delivered on the main looper (the callback only queues the reading; processing runs in the engine's coroutine), unregistered in `awaitClose`. Unbounded buffer: a reading is never dropped. |
 
 ## Status rules
 No counter sensor → `UNAVAILABLE`. Android 10+ without `ACTIVITY_RECOGNITION` → `PERMISSION_DENIED`. Otherwise `ACTIVE`. A failed registration closes the flow with an error (the engine maps it to `UNAVAILABLE` + `STEPS_FAILED`).
