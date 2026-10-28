@@ -128,10 +128,20 @@ jobs:
         run: |
           grep -q "TrackingCore.xcframework" "$RUNNER_TEMP/dryrun.txt" || { echo "❌ TrackingCore.xcframework is not part of the package"; exit 1; }
 
+      # pub looks for its credentials in a per-OS folder: ~/.config/dart on Linux, but
+      # ~/Library/Application Support/dart on macOS (this job runs on macOS). Write both.
       - name: Write pub credentials
+        env:
+          PUB_CREDENTIALS: ${{ secrets.PUB_CREDENTIALS }}
         run: |
-          mkdir -p "$HOME/.config/dart"
-          echo '${{ secrets.PUB_CREDENTIALS }}' > "$HOME/.config/dart/pub-credentials.json"
+          if [ -z "$PUB_CREDENTIALS" ]; then
+            echo "❌ The PUB_CREDENTIALS secret is empty or missing"
+            exit 1
+          fi
+          for dir in "$HOME/.config/dart" "$HOME/Library/Application Support/dart"; do
+            mkdir -p "$dir"
+            printf '%s' "$PUB_CREDENTIALS" > "$dir/pub-credentials.json"
+          done
 
       - name: Publish to pub.dev
         run: flutter pub publish --force
