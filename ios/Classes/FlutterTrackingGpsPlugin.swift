@@ -50,6 +50,14 @@ public class FlutterTrackingGpsPlugin: NSObject, FlutterPlugin, TrackingHostApi 
         FlutterTrackingGpsPlugin.engine.requestPermission { completion(.success($0)) }
     }
 
+    func stepsPermissionStatus() throws -> NativePermission {
+        FlutterTrackingGpsPlugin.engine.stepsPermissionStatus()
+    }
+
+    func requestStepsPermission(completion: @escaping (Result<NativePermission, Error>) -> Void) {
+        FlutterTrackingGpsPlugin.engine.requestStepsPermission { completion(.success($0)) }
+    }
+
     func start(config: StartConfig, completion: @escaping (Result<NativeSnapshot, Error>) -> Void) {
         FlutterTrackingGpsPlugin.engine.start(config: config, completion: completion)
     }

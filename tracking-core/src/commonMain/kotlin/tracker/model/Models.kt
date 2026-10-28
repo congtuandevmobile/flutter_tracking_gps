@@ -72,6 +72,12 @@ data class TrackingConfig(
     /** Stay-point detector used for moving time. */
     val stopRadiusMeters: Double = 15.0,
     val stopMinDwellMs: Long = 30_000,
+    /**
+     * Stride (metres per step) to start from, e.g. the one learned in the user's
+     * last recording. null = none: a step count is not turned into a distance
+     * estimate until GPS has taught the engine a stride in this session.
+     */
+    val initialStrideMeters: Double? = null,
 ) {
     init {
         require(maxAccuracyMeters.isFinite() && maxAccuracyMeters > 0.0) { "maxAccuracyMeters" }
@@ -83,6 +89,7 @@ data class TrackingConfig(
         require(reanchorAfterRejects > 0) { "reanchorAfterRejects" }
         require(pdrConfirmRatio.isFinite() && pdrConfirmRatio > 0.0 && pdrConfirmRatio <= 1.0) { "pdrConfirmRatio" }
         require(stopRadiusMeters.isFinite() && stopRadiusMeters > 0.0 && stopMinDwellMs > 0) { "stop detector" }
+        require(initialStrideMeters == null || (initialStrideMeters.isFinite() && initialStrideMeters > 0.0)) { "initialStrideMeters" }
     }
 
     companion object {
@@ -131,4 +138,6 @@ data class TrackingSnapshot(
     val lastFixAtMs: Long?,
     val movingTimeMs: Long,
     val isStopped: Boolean,
+    /** Learned (or configured) metres per step; null while unknown. */
+    val strideMeters: Double? = null,
 )

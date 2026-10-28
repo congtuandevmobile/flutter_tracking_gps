@@ -5,6 +5,7 @@ import 'package:flutter_tracking_gps/src/domain/tracking_fix.dart';
 import 'package:flutter_tracking_gps/src/domain/tracking_snapshot.dart';
 import 'package:flutter_tracking_gps/src/domain/tracking_state.dart';
 import 'package:flutter_tracking_gps/src/engine/geo.dart';
+import 'package:flutter_tracking_gps/src/engine/stride_estimator.dart';
 
 /// Result of feeding one fix.
 class FixResult {
@@ -33,11 +34,13 @@ class FixResult {
 ///  * The total only grows.
 class GpsDistanceEngine {
   GpsDistanceEngine({required this.config, TrackingLog? log})
-    : log = log ?? TrackingLog();
+    : log = log ?? TrackingLog(),
+      _stride = StrideEstimator(initialStrideMeters: config.initialStrideMeters);
 
   final TrackingConfig config;
   final TrackingLog log;
   final ledger = DistanceLedger();
+  final StrideEstimator _stride;
 
   RecordingState _state = RecordingState.idle;
   GpsQuality _quality = GpsQuality.unknown;
@@ -74,6 +77,7 @@ class GpsDistanceEngine {
     fixCount: _fixCount,
     speedMps: _speedMps,
     lastFixAt: _lastAcceptedFixAt,
+    strideMeters: _stride.strideMeters,
   );
 
   // ── Lifecycle ───────────────────────────────────────────────────────────
@@ -96,6 +100,7 @@ class GpsDistanceEngine {
     _fixCount = 0;
     _rejectStreak = 0;
     _pendingPdr = 0;
+    _stride.reset();
     log.note(at, 'start segment $segmentId');
   }
 
@@ -105,6 +110,7 @@ class GpsDistanceEngine {
     if (_state != RecordingState.running) return;
     _state = RecordingState.paused;
     _dropPending(at, 'pause');
+    _stride.breakWindow();
     _anchor = null;
     _lastHealthyAt = null;
     _quality = GpsQuality.unknown;
@@ -125,6 +131,7 @@ class GpsDistanceEngine {
     _pendingPdr = 0;
     _quality = GpsQuality.unknown;
     _rejectStreak = 0;
+    _stride.breakWindow();
     log.note(at, 'resume segment $segmentId');
   }
 
@@ -134,6 +141,7 @@ class GpsDistanceEngine {
       return;
     }
     _dropPending(at, 'finish');
+    _stride.breakWindow();
     _state = RecordingState.finished;
     log.note(at, 'finish at ${totalMeters.toStringAsFixed(1)} m');
   }
@@ -147,6 +155,33 @@ class GpsDistanceEngine {
     if (_state != RecordingState.running) return;
     if (segmentId != null && segmentId != _segmentId) return;
     if (!meters.isFinite || meters <= 0) return;
+    _addPending(at, meters);
+  }
+
+  /// New steps of [segmentId] (a DELTA, not a running total). While GPS is good
+  /// they teach the stride (with the GPS metres of the same window) and are not
+  /// distance. While it is not good and a stride is known they become a PENDING
+  /// estimate (`steps * stride`) that the returning GPS must confirm, like
+  /// [submitPdr]. With no known stride nothing is estimated. Steps of another
+  /// segment, or while not running, are refused.
+  void onSteps(DateTime at, int steps, {required int segmentId}) {
+    if (_state != RecordingState.running ||
+        segmentId != _segmentId ||
+        steps <= 0) {
+      return;
+    }
+    if (_quality == GpsQuality.good) {
+      _stride.addSteps(steps);
+      return;
+    }
+    _stride.breakWindow();
+    if (config.pdrPolicy == PdrPolicy.off) return;
+    final perStep = _stride.strideMeters;
+    if (perStep == null) return;
+    _addPending(at, steps * perStep);
+  }
+
+  void _addPending(DateTime at, double meters) {
     // While GPS is measuring, GPS already has this stretch.
     if (_quality == GpsQuality.good || _quality == GpsQuality.recovering) {
       return;
@@ -289,6 +324,7 @@ class GpsDistanceEngine {
       meters: distance,
       at: now,
     );
+    _stride.addMeters(distance);
     _anchor = fix;
     return FixResult(
       FixVerdict.accepted,
@@ -352,6 +388,7 @@ class GpsDistanceEngine {
     final pending = _pendingPdr;
     _pendingPdr = 0;
     _rejectStreak = 0;
+    _stride.breakWindow();
     final gap = Duration(milliseconds: (dt * 1000).round());
 
     var credit = 0.0;

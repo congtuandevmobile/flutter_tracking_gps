@@ -10,7 +10,7 @@ private fun bridge(adaptive: Boolean = false, pdr: Boolean = true) = TrackingCor
     maxAccuracyMeters = 40.0, maxFixAgeMs = 30_000, silenceAfterMs = 10_000, maxSpeedMps = 10.0,
     minStepMeters = 2.0, accuracyNoiseFactor = 0.5, stationarySpeedMps = 0.4, maxBridgeMs = 120_000,
     reanchorAfterRejects = 3, rejectMock = true, pdrEnabled = pdr, pdrConfirmRatio = 0.5,
-    kalman = false, stopRadiusMeters = 15.0, stopMinDwellMs = 30_000,
+    kalman = false, stopRadiusMeters = 15.0, stopMinDwellMs = 30_000, initialStrideMeters = -1.0,
     adaptiveSampling = adaptive, batterySaver = false,
 )
 

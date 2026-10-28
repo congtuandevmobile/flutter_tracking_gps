@@ -40,6 +40,7 @@ internal fun createBridge(engine: EngineConfig, adaptiveSampling: Boolean, batte
         kalman = engine.kalman,
         stopRadiusMeters = engine.stopRadiusMeters,
         stopMinDwellMs = engine.stopMinDwellMs,
+        initialStrideMeters = engine.initialStrideMeters,
         adaptiveSampling = adaptiveSampling,
         batterySaver = batterySaver,
     )
@@ -62,6 +63,7 @@ internal fun createBridge(engine: EngineConfig, adaptiveSampling: Boolean, batte
  */
 internal class TrackingEngine(
     private val source: LocationSource,
+    private val stepSource: StepSource = NoStepSource,
     private val store: FixStore,
     private val scope: CoroutineScope,
     private val wallClockMs: () -> Long = System::currentTimeMillis,
@@ -90,11 +92,14 @@ internal class TrackingEngine(
     @Volatile private var fixCount = 0L
     @Volatile private var lastFixTimeMs: Long? = null
     @Volatile private var lastError: String? = null
+    @Volatile private var stepsStatus = NativeStepsStatus.OFF
     @Volatile private var core: TrackingCoreBridge? = null
     @Volatile private var request: Request? = null
     private var seq = 0L
     private var collector: Job? = null
     private var ticker: Job? = null
+    private var stepJob: Job? = null
+    private var stepsEnabled = false
     private var adaptive = false
     private var reconfiguring = false
 
@@ -113,6 +118,7 @@ internal class TrackingEngine(
         sessionId = sessionId,
         lastFixTimeMs = lastFixTimeMs,
         error = lastError,
+        stepsStatus = stepsStatus,
     )
 
     suspend fun start(config: StartConfig): NativeSnapshot = commands.withLock {
@@ -124,13 +130,15 @@ internal class TrackingEngine(
         lastFixTimeMs = null
         lastError = null
         adaptive = config.adaptiveSampling
+        stepsEnabled = config.stepsEnabled
         request = Request(config.intervalMs, config.minDistanceMeters.toFloat())
         val bridge = coreFactory(config.engine, config.adaptiveSampling, config.batterySaver)
         synchronized(coreLock) {
-            bridge.start(config.sessionId, monotonicMs(), config.startSegmentId.toInt())
+            bridge.start(config.sessionId, monotonicMs(), config.startSegmentId.toInt(), config.initialSteps)
             core = bridge
         }
         beginCollecting(config.sessionId)
+        beginSteps()
         publish()
         snapshot()
     }
@@ -150,6 +158,7 @@ internal class TrackingEngine(
             segmentId += 1
             coreStrict { it.resume(monotonicMs(), segmentId.toInt()) }
             beginCollecting(id)
+            beginSteps()
             publish()
         }
         snapshot()
@@ -195,7 +204,10 @@ internal class TrackingEngine(
         var segment = fixesOnDisk.firstOrNull()?.segmentId ?: config.startSegmentId
         var lastSeq = -1L
         synchronized(coreLock) {
-            bridge.start(config.sessionId, fixesOnDisk.firstOrNull()?.elapsedMs ?: monotonicMs(), segment.toInt())
+            bridge.start(
+                config.sessionId, fixesOnDisk.firstOrNull()?.elapsedMs ?: monotonicMs(), segment.toInt(),
+                config.initialSteps,
+            )
             for (fix in fixesOnDisk) {
                 if (fix.segmentId != segment) {
                     bridge.pause(fix.elapsedMs)
@@ -213,6 +225,8 @@ internal class TrackingEngine(
         }
         sessionId = config.sessionId
         adaptive = config.adaptiveSampling
+        stepsEnabled = config.stepsEnabled
+        stepsStatus = NativeStepsStatus.OFF
         request = Request(config.intervalMs, config.minDistanceMeters.toFloat())
         segmentId = segment
         seq = lastSeq + 1
@@ -244,6 +258,39 @@ internal class TrackingEngine(
         collector = null
         ticker?.cancel()
         ticker = null
+        stepJob?.cancel()
+        stepJob = null
+    }
+
+    /**
+     * Registers the step sensor for the open segment. A failed or missing sensor
+     * (no permission, no hardware) never stops the recording: it only sets
+     * [stepsStatus]. The segment is captured now, so a reading that arrives after
+     * a resume cannot be fed to the wrong segment (the core refuses it too).
+     */
+    private fun beginSteps() {
+        if (!stepsEnabled) {
+            stepsStatus = NativeStepsStatus.OFF
+            return
+        }
+        val status = stepSource.status()
+        stepsStatus = status
+        if (status != NativeStepsStatus.ACTIVE) return
+        val segment = segmentId.toInt()
+        stepJob = scope.launch {
+            stepSource.counts()
+                .catch { error ->
+                    if (error is CancellationException) throw error
+                    Log.e(LOG_TAG, "step sensor failed", error)
+                    stepsStatus = NativeStepsStatus.UNAVAILABLE
+                    lastError = "${TrackingErrorCode.STEPS_FAILED}: ${error.message ?: error::class.java.simpleName}"
+                    publish()
+                }
+                .collect { sample ->
+                    withCore { it.onStepCounter(segment, monotonicMs(), sample.raw) }
+                    publish()
+                }
+        }
     }
 
     private fun beginCollecting(id: String) {
@@ -371,6 +418,8 @@ internal class TrackingEngine(
             isStopped = s.isStopped,
             speedMps = s.speedMps,
             lastAcceptedFixAtMs = s.lastFixAtMs,
+            steps = s.steps,
+            strideMeters = s.strideMeters,
         )
     }
 
@@ -418,4 +467,6 @@ internal fun emptyDistance(): NativeDistance = NativeDistance(
     isStopped = false,
     speedMps = -1.0,
     lastAcceptedFixAtMs = -1,
+    steps = 0,
+    strideMeters = -1.0,
 )

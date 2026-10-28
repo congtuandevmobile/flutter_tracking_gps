@@ -1,5 +1,7 @@
 import 'dart:async';
+import 'dart:developer' as developer;
 
+import 'package:flutter_tracking_gps/src/api/tracking_presenter.dart';
 import 'package:flutter_tracking_gps/src/domain/tracking_config.dart';
 import 'package:flutter_tracking_gps/src/domain/tracking_snapshot.dart';
 import 'package:flutter_tracking_gps/src/domain/tracking_state.dart';
@@ -23,6 +25,10 @@ class TrackingSession {
     this.batterySaver = false,
     this.notificationTitle = 'Recording',
     this.notificationText = 'Tracking your activity',
+    this.stepsEnabled = false,
+    this.initialSteps = 0,
+    this.presenter,
+    this.onPresenterError,
   }) : _platform = platform;
 
   final TrackingPlatform _platform;
@@ -34,6 +40,32 @@ class TrackingSession {
   final bool batterySaver;
   final String notificationTitle;
   final String notificationText;
+
+  /// Count steps natively and let the engine turn them into a PENDING distance
+  /// estimate while GPS is weak (it only counts if the GPS that returns
+  /// confirms it). Needs the motion permission (see
+  /// `FlutterTrackingGps.requestStepsPermission`); without it the recording goes
+  /// on and `snapshot.stepsStatus` says so. iOS shows the Motion & Fitness prompt
+  /// at the first start when it was not asked before.
+  final bool stepsEnabled;
+
+  /// Session steps to restore after a process death (the device counter is never
+  /// added to it); 0 for a new session.
+  final int initialSteps;
+
+  /// Shows the recording outside the app (a Live Activity, an ongoing
+  /// notification...). null = none: iOS shows nothing extra and Android shows the
+  /// SDK's own default notification, which keeps the process alive.
+  final TrackingPresenter? presenter;
+
+  /// Called when the [presenter] throws; the recording is not affected. Defaults
+  /// to a `dart:developer` log.
+  final void Function(Object error, StackTrace stack)? onPresenterError;
+
+  AndroidForegroundMode get _foregroundMode =>
+      presenter?.ownsAndroidForegroundService == true
+      ? AndroidForegroundMode.external
+      : AndroidForegroundMode.builtIn;
 
   StreamSubscription<PlatformSnapshot>? _sub;
   String? _sessionId;
@@ -72,14 +104,19 @@ class TrackingSession {
       batterySaver: batterySaver,
       notificationTitle: notificationTitle,
       notificationText: notificationText,
+      stepsEnabled: stepsEnabled,
+      initialSteps: initialSteps,
+      foregroundMode: _foregroundMode,
     );
     _requireRunning(native);
     _apply(native);
+    _present(_Present.start);
   }
 
   Future<void> pause() async {
     final id = _requireOpen(RecordingState.running);
     _apply(await _platform.pause(id));
+    _present(_Present.pause);
   }
 
   Future<void> resume() async {
@@ -87,6 +124,7 @@ class TrackingSession {
     final native = await _platform.resume(id);
     _requireRunning(native);
     _apply(native);
+    _present(_Present.resume);
   }
 
   /// Ends the recording. The returned snapshot is final.
@@ -99,6 +137,7 @@ class TrackingSession {
     await _sub?.cancel();
     _sub = null;
     _apply(native);
+    _present(_Present.finish);
     return _last;
   }
 
@@ -122,6 +161,8 @@ class TrackingSession {
       minDistanceMeters: config.minDistanceMeters,
       adaptiveSampling: adaptiveSampling,
       batterySaver: batterySaver,
+      stepsEnabled: stepsEnabled,
+      initialSteps: initialSteps,
     );
     _apply(native);
   }
@@ -137,6 +178,7 @@ class TrackingSession {
   }
 
   Future<void> dispose() async {
+    await _presenterQueue;
     await _sub?.cancel();
     _sub = null;
     await _updates.close();
@@ -148,6 +190,10 @@ class TrackingSession {
     _sub ??= _platform.snapshots.listen((native) {
       if (native.sessionId != _sessionId) return;
       _apply(native);
+      if (_last.state == RecordingState.running ||
+          _last.state == RecordingState.paused) {
+        _presentUpdate();
+      }
     });
   }
 
@@ -175,6 +221,9 @@ class TrackingSession {
       lastFixAt: d.lastAcceptedFixAt,
       movingTime: d.movingTime,
       isStopped: d.isStopped,
+      steps: d.steps,
+      strideMeters: d.strideMeters,
+      stepsStatus: native.stepsStatus,
     );
     final changed =
         next.state != _last.state ||
@@ -185,9 +234,62 @@ class TrackingSession {
         next.speedMps != _last.speedMps ||
         next.movingTime != _last.movingTime ||
         next.isStopped != _last.isStopped ||
-        next.fixCount != _last.fixCount;
+        next.fixCount != _last.fixCount ||
+        next.steps != _last.steps;
     _last = next;
     if (changed && !_updates.isClosed) _updates.add(next);
+  }
+
+  // ── Presenter ───────────────────────────────────────────────────────────
+
+  Future<void> _presenterQueue = Future<void>.value();
+  DateTime? _lastPresentedAt;
+
+  /// Presenter updates are throttled to about once per second.
+  static const _presentEvery = Duration(seconds: 1);
+
+  void _presentUpdate() {
+    final now = DateTime.now();
+    final last = _lastPresentedAt;
+    if (last != null && now.difference(last) < _presentEvery) return;
+    _present(_Present.update);
+  }
+
+  /// Queues one call to the presenter. Calls never overlap and keep their order;
+  /// a failure is reported, never rethrown into the recording.
+  void _present(_Present event) {
+    final target = presenter;
+    if (target == null) return;
+    final snapshot = _last;
+    _lastPresentedAt = DateTime.now();
+    _presenterQueue = _presenterQueue.then((_) async {
+      try {
+        switch (event) {
+          case _Present.start:
+            await target.onStart(snapshot);
+          case _Present.update:
+            await target.onUpdate(snapshot);
+          case _Present.pause:
+            await target.onPause(snapshot);
+          case _Present.resume:
+            await target.onResume(snapshot);
+          case _Present.finish:
+            await target.onFinish(snapshot);
+        }
+      } on Object catch (error, stack) {
+        final handler = onPresenterError;
+        if (handler != null) {
+          handler(error, stack);
+        } else {
+          developer.log(
+            'presenter ${event.name} failed',
+            name: 'flutter_tracking_gps',
+            error: error,
+            stackTrace: stack,
+          );
+        }
+      }
+    });
   }
 
   String _requireOpen(RecordingState expected) {
@@ -209,3 +311,5 @@ class TrackingSession {
     }
   }
 }
+
+enum _Present { start, update, pause, resume, finish }

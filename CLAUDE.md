@@ -29,4 +29,9 @@ and `docs/NATIVE_RULES.md` before touching `android/` or `ios/`.
   monotonic clock (Android `elapsedRealtime`, iOS `CLOCK_MONOTONIC`), never from
   the wall clock. Keep the wall time only for display and storage.
 - A step estimate always carries its segment id.
-
+- Steps: native only reads the sensor; `StepSession` (accounting) and
+  `StrideEstimator` (metres) live in `tracking-core` with a Dart twin. A step
+  estimate is always PENDING until returning GPS confirms it. See `docs/FLOW.md`.
+- Live activity / notification: the SDK depends on no such package; apps plug one
+  in through `TrackingPresenter` (`docs/PRESENTER.md`). The Android default
+  notification is native (`TrackingService`) so it survives the Flutter engine.

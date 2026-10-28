@@ -13,9 +13,14 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 
 /**
- * Keeps the process in the foreground while a session records (type
- * `location`). It owns no tracking logic: the [TrackingEngine] does the work,
- * this only holds the ongoing notification Android requires.
+ * The default way the SDK keeps the process alive while a session records: a
+ * foreground service of type `location` with a plain ongoing notification. The
+ * title and text come from Flutter (`notificationTitle` / `notificationText`);
+ * tapping it returns to the app. It owns no tracking logic and shows no live
+ * data: the [TrackingEngine] does the work.
+ *
+ * It is NOT started when the app picked `NativeForegroundMode.EXTERNAL` (a
+ * third-party plugin then owns a foreground service).
  */
 class TrackingService : Service() {
 
@@ -85,6 +90,6 @@ class TrackingService : Service() {
         private const val CHANNEL_NAME = "Activity recording"
         private const val NOTIFICATION_ID = 7421
         private const val DEFAULT_TITLE = "Recording"
-        private const val DEFAULT_TEXT = "Tracking your activity"
+        private const val DEFAULT_TEXT = "Tracking your activity. Tap to return to the app."
     }
 }

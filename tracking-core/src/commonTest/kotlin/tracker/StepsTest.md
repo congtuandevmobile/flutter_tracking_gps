@@ -1,0 +1,3 @@
+# StepsTest.kt
+
+Tests of the step feature in `tracking-core`: `StrideEstimatorTest` (needs both steps and metres, shaking never teaches a stride, implausible stride discarded, moving average, initial stride), `StepSessionTest` (baseline, pause/resume, counter going backwards, segment counts, exact close, restore), `EngineStepsTest` (stride learned from good GPS and steps are not distance then, no stride = no estimate, a GPS gap credits one source once, shaking adds nothing, an estimate is capped by the corroborated straight line, other segment / paused refused, cycling never pending, initial stride) and `BridgeStepsTest`. The Dart twin is `test/engine/steps_test.dart`.

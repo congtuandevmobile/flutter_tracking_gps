@@ -29,3 +29,5 @@ Tests the Android `TrackingEngine` and its glue to the shared Kotlin core withou
 
 ## Notes
 `android.util.Log` returns defaults in unit tests (`isReturnDefaultValues = true` in `build.gradle.kts`); the writer coroutine runs on the real `Dispatchers.IO`, so a few tests wait briefly for it.
+
+Added: `stepsWhileGpsIsDegradedBecomeAPendingEstimateNotDistance`, `pauseUnregistersTheStepSensorAndResumeRegistersItAgain`, `aMissingPermissionOnlyDisablesStepsTheRecordingGoesOn`, `stepsOffByConfigNeverTouchTheSensor`, `walkedWhilePausedIsNotCountedAfterResume` (with a `FakeSteps` source).

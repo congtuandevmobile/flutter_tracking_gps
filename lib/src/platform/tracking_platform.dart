@@ -10,6 +10,15 @@ enum PlatformPermission {
   servicesDisabled,
 }
 
+/// Who keeps the Android process alive while recording.
+enum AndroidForegroundMode {
+  /// The SDK's own foreground service and default notification.
+  builtIn,
+
+  /// A third-party presenter owns a foreground service; the SDK starts none.
+  external,
+}
+
 enum PlatformState { idle, running, paused, stopped, permissionDenied, error }
 
 /// What the native distance engine has decided.
@@ -25,6 +34,8 @@ class PlatformDistance {
     required this.isStopped,
     this.speedMps,
     this.lastAcceptedFixAt,
+    this.steps = 0,
+    this.strideMeters,
   });
 
   const PlatformDistance.empty()
@@ -37,7 +48,9 @@ class PlatformDistance {
       movingTime = Duration.zero,
       isStopped = false,
       speedMps = null,
-      lastAcceptedFixAt = null;
+      lastAcceptedFixAt = null,
+      steps = 0,
+      strideMeters = null;
 
   final GpsQuality quality;
   final double totalMeters;
@@ -49,6 +62,12 @@ class PlatformDistance {
   final bool isStopped;
   final double? speedMps;
   final DateTime? lastAcceptedFixAt;
+
+  /// Accepted steps of the session (zero without a step sensor).
+  final int steps;
+
+  /// Learned or configured metres per step; null while unknown.
+  final double? strideMeters;
 }
 
 class PlatformSnapshot {
@@ -57,6 +76,7 @@ class PlatformSnapshot {
     required this.segmentId,
     required this.fixCount,
     this.distance = const PlatformDistance.empty(),
+    this.stepsStatus = StepsStatus.off,
     this.sessionId,
     this.error,
   });
@@ -66,6 +86,7 @@ class PlatformSnapshot {
   final int segmentId;
   final int fixCount;
   final PlatformDistance distance;
+  final StepsStatus stepsStatus;
   final String? error;
 }
 
@@ -81,6 +102,11 @@ abstract interface class TrackingPlatform {
   Future<PlatformPermission> permissionStatus();
   Future<PlatformPermission> requestPermission();
 
+  /// Motion permission of the step sensor (`ACTIVITY_RECOGNITION` / Motion &
+  /// Fitness); granted when the device needs none.
+  Future<PlatformPermission> stepsPermissionStatus();
+  Future<PlatformPermission> requestStepsPermission();
+
   Future<PlatformSnapshot> start({
     required String sessionId,
     required int startSeq,
@@ -92,6 +118,9 @@ abstract interface class TrackingPlatform {
     required bool batterySaver,
     required String notificationTitle,
     required String notificationText,
+    required bool stepsEnabled,
+    required int initialSteps,
+    required AndroidForegroundMode foregroundMode,
   });
 
   /// Rebuilds the native engine of [sessionId] from the persisted fixes after a
@@ -103,6 +132,8 @@ abstract interface class TrackingPlatform {
     required double minDistanceMeters,
     required bool adaptiveSampling,
     required bool batterySaver,
+    required bool stepsEnabled,
+    required int initialSteps,
   });
 
   Future<PlatformSnapshot> pause(String sessionId);

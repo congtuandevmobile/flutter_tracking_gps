@@ -1,3 +1,27 @@
+## 0.1.0
+
+* **Steps in the engine (B + C).** Native sensors (Android `TYPE_STEP_COUNTER`, iOS
+  `CMPedometer`, ported from `uprace_steps_counter`) feed the shared core. The core
+  owns the accounting (`StepSession`) and the metres (`StrideEstimator`): the stride
+  is learned from good GPS and, while GPS is weak, steps become a **pending**
+  estimate the returning GPS must confirm (same `GapReconciler`, one source per
+  gap). Opt in with `createSession(stepsEnabled: true)`; `initialStrideMeters`,
+  `initialSteps`, `snapshot.steps`, `strideMeters`, `stepsStatus`,
+  `requestStepsPermission()`. Dart reference twin and tests added.
+* **`TrackingPresenter`** hook for a third-party live activity / notification
+  (`createSession(presenter: ...)`, `docs/PRESENTER.md`). Android now has a default
+  foreground notification (distance + chronometer, updated by native); a presenter
+  that owns a foreground service can replace it (`ownsAndroidForegroundService`).
+* Pigeon: `StartConfig.stepsEnabled/initialSteps/foregroundMode`,
+  `EngineConfig.initialStrideMeters`, `NativeDistance.steps/strideMeters`,
+  `NativeSnapshot.stepsStatus`, `stepsPermissionStatus`, `requestStepsPermission`.
+  `TrackingCoreBridge` takes `initialStrideMeters` and has `onStepCounter`,
+  `onSegmentSteps`, `correctClosedSegment`. Rebuild the iOS framework with
+  `tool/build_core.sh`.
+* iOS: `NSMotionUsageDescription` needed for steps; the pod links CoreMotion.
+  Android: manifest adds `ACTIVITY_RECOGNITION`.
+* Tests: 83 core, 15 Android engine, 15 iOS engine, 55 Dart. Not tested on a device.
+
 ## 0.0.3
 
 Audit fixes (each pinned by a test that failed before):

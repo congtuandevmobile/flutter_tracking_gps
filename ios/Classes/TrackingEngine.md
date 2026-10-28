@@ -55,3 +55,6 @@ Every failure is a `PigeonError` with code, message, details; a failed write is 
 
 ## Tested by
 `RunnerTests.swift` (fake provider and store, real Kotlin core).
+
+## Steps (added)
+`init(..., steps: StepProviding = CoreMotionStepProvider())`. `beginSteps()` (after the location updates start, on start and resume): `stepsEnabled` false → `.off`; otherwise `steps.status` (`.permissionDenied` / `.unavailable` only set the status), `.active` subscribes from the segment start and feeds `core.onSegmentSteps` on `queue`, guarded by `stepGeneration` and `state == .running`. `closeStepSegment()` (pause, stop): ends the subscription, asks the OS for the exact count up to the boundary, and applies it with `core.correctClosedSegment` only if the same segment is still the closed one and the session is not running. `stepsPermissionStatus()` / `requestStepsPermission()`. Snapshot: `stepsStatus`, `distance.steps`, `distance.strideMeters`.

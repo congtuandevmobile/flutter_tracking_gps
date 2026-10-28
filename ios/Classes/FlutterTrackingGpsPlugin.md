@@ -19,3 +19,5 @@ Results on the main thread, `[weak self]` / weak references in closures and call
 
 ## Related
 Contract: `pigeons/tracking_api.dart` (generated in `TrackingApi.g.swift`).
+
+Added: `stepsPermissionStatus()` and `requestStepsPermission(completion:)` forwarded to the engine. `StartConfig.foregroundMode` is ignored on iOS.

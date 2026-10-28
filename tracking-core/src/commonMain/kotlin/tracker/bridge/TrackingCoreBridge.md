@@ -31,3 +31,14 @@ Constructor parameters mirror `TrackingConfig` (`maxAccuracyMeters, maxFixAgeMs,
 
 ## Used by
 `android/.../TrackingEngine.kt`, `ios/Classes/TrackingEngine.swift`. Tested by `BridgeTest`.
+
+## Steps (added)
+New constructor parameter `initialStrideMeters` (zero or negative = none). `start(sessionId, atMs, segmentId, initialSteps = 0)`.
+
+| Function | Description |
+|---|---|
+| `onStepCounter(segmentId, atMs, raw)` | Android: a reading of the cumulative counter (first reading of a segment = baseline). |
+| `onSegmentSteps(segmentId, atMs, segmentSteps)` | iOS: steps since the segment started. |
+| `correctClosedSegment(exactSteps)` | iOS: exact OS count for the segment just paused or finished; changes the displayed total only. |
+
+`BridgeSnapshot` gains `steps` (accepted session steps) and `strideMeters` (negative = unknown). `atMs` is the arrival time on the engine's clock (a sensor reading can be late: documented limit). `pause`/`resume`/`finish` also close/open the step segment.

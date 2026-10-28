@@ -44,6 +44,7 @@ class TrackingConfig {
     this.stopMinDwell = const Duration(seconds: 30),
     this.updateInterval = const Duration(seconds: 1),
     this.minDistanceMeters = 0,
+    this.initialStrideMeters,
   });
 
   /// Speed ceiling per sport (m/s). Running 10 and cycling 25 are the values
@@ -106,4 +107,9 @@ class TrackingConfig {
   /// Native request: update interval and minimum displacement.
   final Duration updateInterval;
   final double minDistanceMeters;
+
+  /// Metres per step to start from (for example the stride learned in the
+  /// user's last recording). null = none: steps are not turned into a distance
+  /// estimate until GPS has taught the engine a stride in this session.
+  final double? initialStrideMeters;
 }

@@ -48,6 +48,33 @@ private final class FakeProvider: LocationProviding {
     }
 }
 
+/// A fake step provider: tests push the segment's step count by hand.
+private final class FakeSteps: StepProviding {
+    var status: NativeStepsStatus = .active
+    var permission: NativePermission = .granted
+    func requestPermission(completion: @escaping (NativePermission) -> Void) { completion(permission) }
+
+    private var handler: ((Int64) -> Void)?
+    private(set) var starts = 0
+    private(set) var stops = 0
+    /// What the OS answers when the segment is closed; nil = the query failed.
+    var exact: Int64?
+
+    func startUpdates(from start: Date, handler: @escaping (Int64) -> Void) {
+        starts += 1
+        self.handler = handler
+    }
+
+    func stopUpdates() {
+        stops += 1
+        handler = nil
+    }
+
+    func query(from: Date, to: Date, completion: @escaping (Int64?) -> Void) { completion(exact) }
+
+    func push(_ steps: Int64) { handler?(steps) }
+}
+
 /// An in-memory store.
 private final class MemoryStore: FixStoring {
     var fixes: [NativeFix] = []
@@ -61,17 +88,24 @@ private final class MemoryStore: FixStoring {
 final class RunnerTests: XCTestCase {
     private let clock = TestClock()
 
-    private func makeEngine(_ provider: FakeProvider, _ store: MemoryStore = MemoryStore()) -> TrackingEngine {
-        TrackingEngine(provider: provider, store: store, monotonicMs: { self.clock.mono }, wallNow: { self.clock.wall })
+    private func makeEngine(
+        _ provider: FakeProvider, _ store: MemoryStore = MemoryStore(), steps: FakeSteps = FakeSteps()
+    ) -> TrackingEngine {
+        TrackingEngine(
+            provider: provider, store: store, steps: steps, monotonicMs: { self.clock.mono },
+            wallNow: { self.clock.wall })
     }
 
-    private func config(_ id: String = "s", adaptive: Bool = false) -> StartConfig {
+    private func config(
+        _ id: String = "s", adaptive: Bool = false, steps: Bool = false, stride: Double = -1
+    ) -> StartConfig {
         StartConfig(
+            stepsEnabled: steps, initialSteps: 0, foregroundMode: .builtIn,
             engine: EngineConfig(
                 maxAccuracyMeters: 40, maxFixAgeMs: 30_000, silenceAfterMs: 10_000, maxSpeedMps: 10,
                 minStepMeters: 2, accuracyNoiseFactor: 0.5, stationarySpeedMps: 0.4, maxBridgeMs: 120_000,
                 reanchorAfterRejects: 3, rejectMock: true, pdrEnabled: true, pdrConfirmRatio: 0.5,
-                kalman: false, stopRadiusMeters: 15, stopMinDwellMs: 30_000),
+                kalman: false, stopRadiusMeters: 15, stopMinDwellMs: 30_000, initialStrideMeters: stride),
             adaptiveSampling: adaptive, batterySaver: false,
             sessionId: id, startSeq: 0, startSegmentId: 0, intervalMs: 1000, minDistanceMeters: 0,
             notificationTitle: "t", notificationText: "t")
@@ -233,5 +267,75 @@ final class RunnerTests: XCTestCase {
         for i in 0...60 { provider.push(north: 0, seconds: Double(i), speed: 0) }
         drain(engine)
         XCTAssertFalse(provider.requestedMinDistances.isEmpty, "the policy should have asked for a sparser request")
+    }
+
+    // MARK: - Steps
+
+    func testWeakGpsStepsBecomeAPendingEstimateNotDistance() throws {
+        let provider = FakeProvider(clock: clock)
+        let steps = FakeSteps()
+        let engine = makeEngine(provider, steps: steps)
+        let started: NativeSnapshot = try run { engine.start(config: config(steps: true, stride: 1.0), completion: $0) }
+        XCTAssertEqual(started.stepsStatus, .active)
+
+        provider.push(north: 0, seconds: 0)
+        provider.push(north: 3, seconds: 1, accuracy: 90)  // degraded
+        steps.push(30)
+        drain(engine)
+        let s = engine.snapshot()
+        XCTAssertEqual(s.distance.steps, 30)
+        XCTAssertEqual(s.distance.pendingPdrMeters, 30, accuracy: 1e-6)
+        XCTAssertEqual(s.distance.totalMeters, 0)
+    }
+
+    func testStepsOffByConfigNeverStartTheSensor() throws {
+        let provider = FakeProvider(clock: clock)
+        let steps = FakeSteps()
+        let engine = makeEngine(provider, steps: steps)
+        let started: NativeSnapshot = try run { engine.start(config: config(), completion: $0) }
+        XCTAssertEqual(started.stepsStatus, .off)
+        XCTAssertEqual(steps.starts, 0)
+    }
+
+    func testAMissingMotionPermissionOnlyDisablesSteps() throws {
+        let provider = FakeProvider(clock: clock)
+        let steps = FakeSteps()
+        steps.status = .permissionDenied
+        let engine = makeEngine(provider, steps: steps)
+        let started: NativeSnapshot = try run { engine.start(config: config(steps: true), completion: $0) }
+        XCTAssertEqual(started.state, .running)
+        XCTAssertEqual(started.stepsStatus, .permissionDenied)
+        XCTAssertEqual(steps.starts, 0)
+    }
+
+    func testPauseEndsTheSubscriptionAndTheExactCountCorrectsTheTotal() throws {
+        let provider = FakeProvider(clock: clock)
+        let steps = FakeSteps()
+        let engine = makeEngine(provider, steps: steps)
+        let _: NativeSnapshot = try run { engine.start(config: config(steps: true), completion: $0) }
+        steps.push(30)
+        steps.exact = 34
+        let paused: NativeSnapshot = try run { engine.pause(sessionId: "s", completion: $0) }
+        XCTAssertEqual(steps.stops, 2, "one when the session opened, one at the pause")
+        drain(engine)
+        XCTAssertEqual(paused.state, .paused)
+        XCTAssertEqual(engine.snapshot().distance.steps, 34)
+        steps.push(500)  // a reading after the pause is ignored
+        drain(engine)
+        XCTAssertEqual(engine.snapshot().distance.steps, 34)
+    }
+
+    func testResumeStartsAFreshStepCountAndKeepsTheTotal() throws {
+        let provider = FakeProvider(clock: clock)
+        let steps = FakeSteps()
+        let engine = makeEngine(provider, steps: steps)
+        let _: NativeSnapshot = try run { engine.start(config: config(steps: true), completion: $0) }
+        steps.push(30)
+        let _: NativeSnapshot = try run { engine.pause(sessionId: "s", completion: $0) }
+        let _: NativeSnapshot = try run { engine.resume(sessionId: "s", completion: $0) }
+        XCTAssertEqual(steps.starts, 2)
+        steps.push(5)  // counted from the new segment's start
+        drain(engine)
+        XCTAssertEqual(engine.snapshot().distance.steps, 35)
     }
 }

@@ -16,3 +16,5 @@ The scope is process-wide by design. Nothing here holds an Activity, a plugin or
 
 ## Used by
 `FlutterTrackingGpsPlugin.kt`.
+
+Also passes `SensorStepSource(appContext)` to the engine.

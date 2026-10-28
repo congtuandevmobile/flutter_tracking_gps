@@ -68,6 +68,8 @@
 	</array>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Used to record the distance of your activity.</string>
+	<key>NSMotionUsageDescription</key>
+	<string>Counts your steps to keep the distance going when GPS is weak.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>location</string>

@@ -46,10 +46,26 @@ After the process died: `await session.restore(sessionId: 'activity-123')`
 (native replays the persisted fixes; the session comes back paused and
 `resume()` continues it in a new segment).
 
+## Steps and live activity
+
+```dart
+await gps.requestStepsPermission();            // Android 10+ / iOS Motion & Fitness
+final session = gps.createSession(
+  stepsEnabled: true,                          // steps help while GPS is weak
+  presenter: MyLiveActivityPresenter(),        // optional, see docs/PRESENTER.md
+);
+```
+
+Steps never become distance on their own: while GPS is weak they make a pending
+estimate that only counts as far as the GPS that returns confirms it. Without a
+presenter, Android shows the SDK's own foreground notification (it keeps the
+recording alive); a third-party live activity plugs in through
+`TrackingPresenter`.
+
 ## Setup
 
-- **iOS (minimum 14):** `Info.plist` → `NSLocationWhenInUseUsageDescription` and
-  `UIBackgroundModes: [location]`.
+- **iOS (minimum 14):** `Info.plist` → `NSLocationWhenInUseUsageDescription`,
+  `UIBackgroundModes: [location]` and, for steps, `NSMotionUsageDescription`.
 - **Android:** nothing to add; the plugin manifest declares the permissions and the
   foreground service. Start from the foreground.
 

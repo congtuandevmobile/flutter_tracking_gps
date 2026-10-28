@@ -14,6 +14,8 @@ class FakePlatform implements TrackingPlatform {
   PlatformState state = PlatformState.idle;
   List<TrackingFix> persisted = [];
   final calls = <String>[];
+  AndroidForegroundMode? lastForegroundMode;
+  bool? lastStepsEnabled;
   late GpsDistanceEngine engine;
   String? sessionId;
   int segment = 0;
@@ -29,6 +31,12 @@ class FakePlatform implements TrackingPlatform {
 
   @override
   Future<PlatformPermission> requestPermission() async => permission;
+
+  @override
+  Future<PlatformPermission> stepsPermissionStatus() async => permission;
+
+  @override
+  Future<PlatformPermission> requestStepsPermission() async => permission;
 
   PlatformSnapshot _snap() {
     final s = engine.snapshot;
@@ -69,8 +77,13 @@ class FakePlatform implements TrackingPlatform {
     required bool batterySaver,
     required String notificationTitle,
     required String notificationText,
+    required bool stepsEnabled,
+    required int initialSteps,
+    required AndroidForegroundMode foregroundMode,
   }) async {
     calls.add('start');
+    lastForegroundMode = foregroundMode;
+    lastStepsEnabled = stepsEnabled;
     this.sessionId = sessionId;
     segment = startSegmentId;
     engine = GpsDistanceEngine(config: config)..start(sessionId, t0);
@@ -86,6 +99,8 @@ class FakePlatform implements TrackingPlatform {
     required double minDistanceMeters,
     required bool adaptiveSampling,
     required bool batterySaver,
+    required bool stepsEnabled,
+    required int initialSteps,
   }) async {
     calls.add('restore');
     this.sessionId = sessionId;

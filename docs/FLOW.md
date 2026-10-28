@@ -110,10 +110,53 @@ screen does not move; it jumps when GPS returns.
 | Slow walker, Doppler under 0.4 | Counts as stationary. Known limit: tune `stationarySpeedMps` from data |
 | Cycling | Use `TrackingConfig.forSport(cycling)` (25 m/s ceiling); do not submit step estimates |
 
-## Step estimates (optional PDR)
+## Steps (native sensor, shared core)
 
-The package has no step sensor. The app may call `session.submitPdr(meters)` with
-an estimate from its own step source (for example `uprace_steps_counter`). It is
+Opt in with `createSession(stepsEnabled: true)`. Native reads the sensor (Android
+`TYPE_STEP_COUNTER`, iOS `CMPedometer`); the shared core decides everything else:
+
+```
+sensor ─► StepSession (baseline / segments / counter reset)  ─► steps delta
+                                                                  │
+                          GPS good ◄───────────────────────────────┤──► GPS not good
+        StrideEstimator learns metres per step                      stride known?  yes ─► PENDING (steps × stride)
+        (steps + GPS metres of the SAME window)                                    no  ─► nothing
+                                                                  │
+                                              the GPS that returns confirms it (GapReconciler): one source per gap
+```
+
+- Steps are **not** distance while GPS is good, and never become distance on
+  their own: a pending estimate counts only as far as the returning GPS
+  corroborates (at most `lowerBound(line) / pdrConfirmRatio`, never more than the
+  speed ceiling allows). A phone shaken without GPS adds 0 m; a loop with no GPS
+  is credited only as far as the straight line allows.
+- The stride is learned only from windows with enough steps AND GPS metres
+  (20 / 20 m), a window with 200 steps and < 20 m is abandoned, an implausible
+  sample (< 0.3 or > 2.5 m) is dropped, then an EMA. With no stride (none learned
+  yet, none in `TrackingConfig.initialStrideMeters`) nothing is estimated.
+  Pass the stride learned in the user's last recording (`snapshot.strideMeters`)
+  as `initialStrideMeters` so a weak start still counts.
+- Pause: the segment is closed, the learning window dropped, the stride kept.
+  Resume: Android takes a fresh baseline (steps walked while paused are never
+  counted), iOS counts from the new segment's start date. At a pause iOS asks the
+  OS for the exact count up to the boundary and corrects the displayed total
+  (never distance).
+- No permission / no sensor: the recording goes on, `snapshot.stepsStatus` says
+  why. Ask with `requestStepsPermission()` (Android 10+ `ACTIVITY_RECOGNITION`,
+  iOS Motion & Fitness; iOS also prompts at the first start when not asked).
+- Cycling never holds a step estimate (`pdrEnabled` is off for it).
+- **Not measured:** Android may report steps up to ~10 s late and stamps a reading
+  with its LAST step, so steps near a pause are under-counted; the core is fed
+  the arrival time. Stride, thresholds and cadence behaviour are unvalidated.
+
+## Foreground notification and live activity
+
+See `PRESENTER.md`.
+
+## Step estimates from the app (optional PDR)
+
+With `stepsEnabled` the package has its own step sensor (above). An app with its own step source may still call `session.submitPdr(meters)` with
+an estimate from its own step source (for example one it already has). It is
 held as pending only while GPS is not good, and it is dropped at pause, finish or
 when there is no anchor to confirm it. `PdrPolicy.off` ignores it entirely.
 

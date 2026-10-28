@@ -1,6 +1,19 @@
 /// The recording lifecycle. Not the same thing as GPS quality or movement.
 enum RecordingState { idle, running, paused, finished }
 
+/// State of the native step sensor.
+enum StepsStatus {
+  /// Not requested (`stepsEnabled` is false) or not started yet.
+  off,
+  active,
+
+  /// The motion permission is missing: the recording goes on without steps.
+  permissionDenied,
+
+  /// The device has no step sensor.
+  unavailable,
+}
+
 enum GpsQuality {
   /// Nothing known yet (just started / resumed).
   unknown,

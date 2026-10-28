@@ -37,6 +37,14 @@ class PigeonTrackingPlatform implements TrackingPlatform {
       _permission(await _api.requestPermission());
 
   @override
+  Future<PlatformPermission> stepsPermissionStatus() async =>
+      _permission(await _api.stepsPermissionStatus());
+
+  @override
+  Future<PlatformPermission> requestStepsPermission() async =>
+      _permission(await _api.requestStepsPermission());
+
+  @override
   Future<PlatformSnapshot> start({
     required String sessionId,
     required int startSeq,
@@ -48,6 +56,9 @@ class PigeonTrackingPlatform implements TrackingPlatform {
     required bool batterySaver,
     required String notificationTitle,
     required String notificationText,
+    required bool stepsEnabled,
+    required int initialSteps,
+    required AndroidForegroundMode foregroundMode,
   }) async => _snapshot(
     await _api.start(
       _startConfig(
@@ -61,6 +72,9 @@ class PigeonTrackingPlatform implements TrackingPlatform {
         batterySaver: batterySaver,
         notificationTitle: notificationTitle,
         notificationText: notificationText,
+        stepsEnabled: stepsEnabled,
+        initialSteps: initialSteps,
+        foregroundMode: foregroundMode,
       ),
     ),
   );
@@ -73,6 +87,8 @@ class PigeonTrackingPlatform implements TrackingPlatform {
     required double minDistanceMeters,
     required bool adaptiveSampling,
     required bool batterySaver,
+    required bool stepsEnabled,
+    required int initialSteps,
   }) async => _snapshot(
     await _api.restoreSession(
       _startConfig(
@@ -86,6 +102,9 @@ class PigeonTrackingPlatform implements TrackingPlatform {
         batterySaver: batterySaver,
         notificationTitle: '',
         notificationText: '',
+        stepsEnabled: stepsEnabled,
+        initialSteps: initialSteps,
+        foregroundMode: AndroidForegroundMode.builtIn,
       ),
     ),
   );
@@ -151,6 +170,9 @@ class PigeonTrackingPlatform implements TrackingPlatform {
     required bool batterySaver,
     required String notificationTitle,
     required String notificationText,
+    required bool stepsEnabled,
+    required int initialSteps,
+    required AndroidForegroundMode foregroundMode,
   }) => StartConfig(
     sessionId: sessionId,
     startSeq: startSeq,
@@ -161,6 +183,12 @@ class PigeonTrackingPlatform implements TrackingPlatform {
     notificationText: notificationText,
     adaptiveSampling: adaptiveSampling,
     batterySaver: batterySaver,
+    stepsEnabled: stepsEnabled,
+    initialSteps: initialSteps,
+    foregroundMode: switch (foregroundMode) {
+      AndroidForegroundMode.builtIn => NativeForegroundMode.builtIn,
+      AndroidForegroundMode.external => NativeForegroundMode.external,
+    },
     engine: EngineConfig(
       maxAccuracyMeters: config.maxAccuracyMeters,
       maxFixAgeMs: config.maxFixAge.inMilliseconds,
@@ -177,6 +205,7 @@ class PigeonTrackingPlatform implements TrackingPlatform {
       kalman: config.smoothing == PositionSmoothing.kalman,
       stopRadiusMeters: config.stopRadiusMeters,
       stopMinDwellMs: config.stopMinDwell.inMilliseconds,
+      initialStrideMeters: config.initialStrideMeters ?? -1,
     ),
   );
 
@@ -204,6 +233,12 @@ class PigeonTrackingPlatform implements TrackingPlatform {
     segmentId: s.segmentId,
     fixCount: s.fixCount,
     distance: _distance(s.distance),
+    stepsStatus: switch (s.stepsStatus) {
+      NativeStepsStatus.off => StepsStatus.off,
+      NativeStepsStatus.active => StepsStatus.active,
+      NativeStepsStatus.permissionDenied => StepsStatus.permissionDenied,
+      NativeStepsStatus.unavailable => StepsStatus.unavailable,
+    },
     error: s.error,
   );
 
@@ -226,5 +261,7 @@ class PigeonTrackingPlatform implements TrackingPlatform {
     lastAcceptedFixAt: d.lastAcceptedFixAtMs < 0
         ? null
         : DateTime.fromMillisecondsSinceEpoch(d.lastAcceptedFixAtMs),
+    steps: d.steps,
+    strideMeters: _known(d.strideMeters),
   );
 }

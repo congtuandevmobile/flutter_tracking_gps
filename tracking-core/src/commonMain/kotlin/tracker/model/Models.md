@@ -63,3 +63,6 @@ The constructor validates every value (`maxAccuracyMeters` finite and positive, 
 
 ## Used by
 `engine/GpsDistanceEngine.kt`, `algorithms/fusion/GapReconciler.kt`, and the tests.
+
+## Steps (added)
+`TrackingConfig.initialStrideMeters: Double?` (null = none) and `TrackingSnapshot.strideMeters: Double?`.

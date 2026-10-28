@@ -50,3 +50,6 @@ Coroutines and Flow only, no `!!`, heavy work on `Dispatchers.IO`.
 
 ## Used by / tested by
 `TrackingRuntime.kt` creates it, `FlutterTrackingGpsPlugin.kt` drives it; `TrackingEngineTest.kt` tests it.
+
+## Steps (added)
+Constructor `stepSource: StepSource = NoStepSource`. `start`/`restore` pass `initialSteps` and `engine.initialStrideMeters`. `beginSteps()` runs on start and resume: with `stepsEnabled` false the status is `OFF`; otherwise `stepSource.status()` decides (`PERMISSION_DENIED`/`UNAVAILABLE` only set `stepsStatus`, the recording goes on); `ACTIVE` collects `counts()` in `stepJob` and feeds `bridge.onStepCounter(segment, now, raw)` with the segment captured at registration. `stopJobs()` (pause, stop) cancels `stepJob`, which unregisters the sensor; adaptive re-requests of the location only restart the collector and ticker, never the step sensor. Snapshot: `stepsStatus`, `distance.steps`, `distance.strideMeters`. New error code `STEPS_FAILED`.

@@ -5,6 +5,7 @@ import tracker.algorithms.filtering.OutlierRejector
 import tracker.algorithms.fusion.GapReconciler
 import tracker.algorithms.geometry.GeoMath
 import tracker.algorithms.motion.StopDetector
+import tracker.algorithms.motion.StrideEstimator
 import tracker.model.DistanceSource
 import tracker.model.FixResult
 import tracker.model.FixVerdict
@@ -82,6 +83,7 @@ class GpsDistanceEngine(
         config.stopRadiusMeters, config.stopMinDwellMs, config.stationarySpeedMps,
         maxOf(config.silenceAfterMs, MIN_OBSERVATION_GAP_MS),
     )
+    private val stride = StrideEstimator(config.initialStrideMeters)
     private val smoother: Kalman2D? = if (config.smoothing == Smoothing.KALMAN) Kalman2D() else null
 
     val totalMeters: Double get() = ledger.totalMeters
@@ -102,6 +104,7 @@ class GpsDistanceEngine(
             lastFixAtMs = lastAcceptedFixAtMs,
             movingTimeMs = movingTimeMs,
             isStopped = stops.isStopped,
+            strideMeters = stride.strideMeters,
         )
 
     // ── Lifecycle ───────────────────────────────────────────────────────────
@@ -129,6 +132,7 @@ class GpsDistanceEngine(
         movingTimeMs = 0
         silenceAfterMs = config.silenceAfterMs
         stops.reset()
+        stride.reset()
         smoother?.reset()
         log.note(atMs, "start segment $segmentId")
     }
@@ -157,6 +161,7 @@ class GpsDistanceEngine(
         pendingPdr = 0.0
         speedMps = null
         stops.reset()
+        stride.breakWindow()
         smoother?.reset()
         log.note(atMs, "resume segment $segmentId")
     }
@@ -177,6 +182,7 @@ class GpsDistanceEngine(
         lastHealthyMs = null
         lastAcceptedFixAtMs = null
         stops.reset()
+        stride.breakWindow()
         smoother?.reset()
         log.note(atMs, "$reason at ${totalMeters.f1()} m")
     }
@@ -193,6 +199,32 @@ class GpsDistanceEngine(
         if (config.pdrPolicy == PdrPolicy.OFF || state != RecordingState.RUNNING) return
         if (segmentId != this.segmentId || atMs < legStartedAtMs) return
         if (!meters.isFinite() || meters <= 0.0) return
+        addPending(atMs, meters)
+    }
+
+    /**
+     * New steps of [segmentId] (a DELTA, not a running total). Two uses, one per
+     * GPS condition, never both for the same steps:
+     *  - GPS good: the steps teach the stride (with the GPS metres of the same
+     *    window); they are not distance.
+     *  - GPS not good and a stride is known: they become a PENDING estimate
+     *    (`steps * stride`) that the GPS that returns must confirm, exactly like
+     *    [submitPdr]. With no known stride nothing is estimated.
+     * Steps of another segment, or while not running, are refused.
+     */
+    fun onSteps(segmentId: Int, atMs: Long, steps: Long) {
+        if (state != RecordingState.RUNNING || segmentId != this.segmentId || steps <= 0L) return
+        if (quality == GpsQuality.GOOD) {
+            stride.addSteps(steps)
+            return
+        }
+        stride.breakWindow()
+        if (config.pdrPolicy == PdrPolicy.OFF) return
+        val perStep = stride.strideMeters ?: return
+        addPending(atMs, steps * perStep)
+    }
+
+    private fun addPending(atMs: Long, meters: Double) {
         // While GPS is measuring, GPS already has this stretch.
         if (quality == GpsQuality.GOOD || quality == GpsQuality.RECOVERING) return
         pendingPdr += meters
@@ -325,6 +357,7 @@ class GpsDistanceEngine(
         if (chord < noise) return FixResult(FixVerdict.NOISE)
 
         ledger.add(segmentId, DistanceSource.GPS, chord, nowMs)
+        stride.addMeters(chord)
         anchor = fix
         return FixResult(FixVerdict.ACCEPTED, chord, DistanceSource.GPS)
     }
@@ -368,6 +401,7 @@ class GpsDistanceEngine(
         val pending = pendingPdr
         pendingPdr = 0.0
         rejectStreak = 0
+        stride.breakWindow()
         val result = GapReconciler.reconcile(chord, uncertainty, gapMs, pending, config)
         if (pending > 0.0) {
             log.note(nowMs, "${result.note}: estimate ${pending.f1()} m, straight line ${chord.f1()} m")

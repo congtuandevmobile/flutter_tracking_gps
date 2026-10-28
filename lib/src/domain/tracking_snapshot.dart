@@ -17,6 +17,9 @@ class TrackingSnapshot {
     this.lastFixAt,
     this.movingTime = Duration.zero,
     this.isStopped = false,
+    this.steps = 0,
+    this.strideMeters,
+    this.stepsStatus = StepsStatus.off,
   });
 
   const TrackingSnapshot.idle()
@@ -33,7 +36,10 @@ class TrackingSnapshot {
       speedMps = null,
       lastFixAt = null,
       movingTime = Duration.zero,
-      isStopped = false;
+      isStopped = false,
+      steps = 0,
+      strideMeters = null,
+      stepsStatus = StepsStatus.off;
 
   final String? sessionId;
   final RecordingState state;
@@ -60,4 +66,14 @@ class TrackingSnapshot {
 
   /// The phone has stayed in one place long enough to count as stopped.
   final bool isStopped;
+
+  /// Accepted steps of the session (native step sensor). Zero when the Dart
+  /// reference engine produced this.
+  final int steps;
+
+  /// Learned (or configured) metres per step; null while unknown.
+  final double? strideMeters;
+
+  /// State of the native step sensor (off unless `stepsEnabled` was asked for).
+  final StepsStatus stepsStatus;
 }

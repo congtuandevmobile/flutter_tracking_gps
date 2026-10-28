@@ -1,6 +1,7 @@
 package tracker.bridge
 
 import tracker.algorithms.power.AdaptiveSamplingPolicy
+import tracker.algorithms.motion.StepSession
 import tracker.algorithms.power.SamplingPlan
 import tracker.engine.GpsDistanceEngine
 import tracker.model.FixVerdict
@@ -30,6 +31,10 @@ class BridgeSnapshot(
     val lastFixAtMs: Long,
     val movingTimeMs: Long,
     val isStopped: Boolean,
+    /** Accepted steps of the session (closed segments + the open one). */
+    val steps: Long,
+    /** Learned or configured metres per step; negative = unknown. */
+    val strideMeters: Double,
 )
 
 /** What to ask the OS for (see `AdaptiveSamplingPolicy`). */
@@ -65,6 +70,8 @@ class TrackingCoreBridge(
     kalman: Boolean,
     stopRadiusMeters: Double,
     stopMinDwellMs: Long,
+    /** Metres per step to start from; zero or negative = none. */
+    initialStrideMeters: Double,
     private val adaptiveSampling: Boolean,
     batterySaver: Boolean,
 ) {
@@ -84,22 +91,62 @@ class TrackingCoreBridge(
         smoothing = if (kalman) Smoothing.KALMAN else Smoothing.OFF,
         stopRadiusMeters = stopRadiusMeters,
         stopMinDwellMs = stopMinDwellMs,
+        initialStrideMeters = if (initialStrideMeters > 0.0) initialStrideMeters else null,
     )
     private val engine = GpsDistanceEngine(config)
     private val sampling = AdaptiveSamplingPolicy(batterySaver)
     private val fixedPlan = SamplingPlan(1_000, 2.0, true)
+    private val steps = StepSession()
 
-    fun start(sessionId: String, atMs: Long, segmentId: Int) {
+    /** [initialSteps] restores a saved session total (the device counter is never added to it). */
+    fun start(sessionId: String, atMs: Long, segmentId: Int, initialSteps: Long = 0) {
         sampling.reset()
         engine.silenceAfterMs = config.silenceAfterMs
         engine.start(sessionId, atMs, segmentId)
+        steps.reset(initialSteps)
+        steps.openSegment()
     }
 
-    fun pause(atMs: Long) = engine.pause(atMs)
+    fun pause(atMs: Long) {
+        engine.pause(atMs)
+        steps.closeSegment()
+    }
 
-    fun resume(atMs: Long, segmentId: Int) = engine.resume(atMs, segmentId)
+    fun resume(atMs: Long, segmentId: Int) {
+        engine.resume(atMs, segmentId)
+        steps.openSegment()
+    }
 
-    fun finish(atMs: Long) = engine.finish(atMs)
+    fun finish(atMs: Long) {
+        engine.finish(atMs)
+        steps.closeSegment()
+    }
+
+    /**
+     * A reading of the device's CUMULATIVE step counter (Android
+     * `TYPE_STEP_COUNTER`) in [segmentId]. The first reading of a segment is a
+     * baseline. The steps it adds go to the engine as a delta (see
+     * `GpsDistanceEngine.onSteps`). [atMs] is the arrival time on the engine's clock.
+     */
+    fun onStepCounter(segmentId: Int, atMs: Long, raw: Long) =
+        feedSteps(segmentId, atMs, steps.onCounter(raw))
+
+    /** A step count since the segment started (iOS `CMPedometer` from a start date). */
+    fun onSegmentSteps(segmentId: Int, atMs: Long, segmentSteps: Long) =
+        feedSteps(segmentId, atMs, steps.onSegmentCount(segmentSteps))
+
+    /**
+     * An exact count for the segment that was just paused or finished (iOS asks
+     * the OS for the range up to the boundary). Changes the displayed total only:
+     * distance is never derived from it.
+     */
+    fun correctClosedSegment(exactSteps: Long) {
+        steps.correctClosedSegment(exactSteps)
+    }
+
+    private fun feedSteps(segmentId: Int, atMs: Long, added: Long) {
+        if (added > 0L) engine.onSteps(segmentId, atMs, added)
+    }
 
     /** A step estimate for [segmentId]; one of another segment is refused. */
     fun submitPdr(segmentId: Int, atMs: Long, meters: Double) = engine.submitPdr(segmentId, atMs, meters)
@@ -159,6 +206,8 @@ class TrackingCoreBridge(
             lastFixAtMs = s.lastFixAtMs ?: -1L,
             movingTimeMs = s.movingTimeMs,
             isStopped = s.isStopped,
+            steps = steps.total,
+            strideMeters = s.strideMeters ?: -1.0,
         )
     }
 

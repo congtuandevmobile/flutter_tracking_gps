@@ -38,6 +38,31 @@ enum NativeTrackingState {
   error,
 }
 
+/// Whether the native step sensor is feeding the engine.
+enum NativeStepsStatus {
+  /// Not requested (`StartConfig.stepsEnabled` is false) or not started yet.
+  off,
+  active,
+
+  /// Motion permission (`ACTIVITY_RECOGNITION` on Android, Motion & Fitness on
+  /// iOS) is missing: the recording goes on without steps.
+  permissionDenied,
+
+  /// The device has no step sensor.
+  unavailable,
+}
+
+/// Who keeps the Android process alive while recording.
+enum NativeForegroundMode {
+  /// The SDK runs its own foreground service with a default notification
+  /// (distance and a chronometer). Survives the Flutter engine.
+  builtIn,
+
+  /// A third-party presenter (for example a live-activity plugin) owns a
+  /// foreground service. The SDK starts none. Ignored on iOS.
+  external,
+}
+
 /// One raw location reading, exactly as the platform produced it. No filter,
 /// no smoothing, no odometer: the Dart engine decides what counts as distance.
 class NativeFix {
@@ -121,6 +146,7 @@ class EngineConfig {
     required this.kalman,
     required this.stopRadiusMeters,
     required this.stopMinDwellMs,
+    required this.initialStrideMeters,
   });
 
   double maxAccuracyMeters;
@@ -142,6 +168,10 @@ class EngineConfig {
   bool kalman;
   double stopRadiusMeters;
   int stopMinDwellMs;
+
+  /// Metres per step to start from; zero or negative = none. Without a stride a
+  /// step count is not turned into a distance estimate until GPS taught one.
+  double initialStrideMeters;
 }
 
 class StartConfig {
@@ -156,7 +186,23 @@ class StartConfig {
     required this.engine,
     required this.adaptiveSampling,
     required this.batterySaver,
+    required this.stepsEnabled,
+    required this.initialSteps,
+    required this.foregroundMode,
   });
+
+  /// Count steps natively (Android `TYPE_STEP_COUNTER`, iOS `CMPedometer`) and
+  /// let the engine turn them into a pending estimate while GPS is weak. Without
+  /// the motion permission the recording goes on and `NativeSnapshot.stepsStatus`
+  /// says so.
+  bool stepsEnabled;
+
+  /// Session steps to restore after a process death (the device counter is never
+  /// added to it); 0 for a new session.
+  int initialSteps;
+
+  /// Android only: who holds the foreground service (see [NativeForegroundMode]).
+  NativeForegroundMode foregroundMode;
 
   /// How the native engine measures distance.
   EngineConfig engine;
@@ -205,6 +251,8 @@ class NativeDistance {
     required this.isStopped,
     required this.speedMps,
     required this.lastAcceptedFixAtMs,
+    required this.steps,
+    required this.strideMeters,
   });
 
   NativeGpsQuality quality;
@@ -225,6 +273,12 @@ class NativeDistance {
 
   /// Measurement time of the latest accepted fix; negative = none yet.
   int lastAcceptedFixAtMs;
+
+  /// Accepted steps of the session (zero without a step sensor).
+  int steps;
+
+  /// Learned or configured metres per step; negative = unknown.
+  double strideMeters;
 }
 
 class NativeSnapshot {
@@ -234,10 +288,14 @@ class NativeSnapshot {
     required this.fixCount,
     required this.updatedAtMs,
     required this.distance,
+    required this.stepsStatus,
     this.sessionId,
     this.lastFixTimeMs,
     this.error,
   });
+
+  /// State of the native step sensor.
+  NativeStepsStatus stepsStatus;
 
   String? sessionId;
   NativeTrackingState state;
@@ -256,6 +314,15 @@ class NativeSnapshot {
 @HostApi()
 abstract class TrackingHostApi {
   NativePermission permissionStatus();
+
+  /// Motion permission for the step sensor: `ACTIVITY_RECOGNITION` (Android 10+)
+  /// or Motion & Fitness (iOS). [NativePermission.granted] when the device needs
+  /// none.
+  NativePermission stepsPermissionStatus();
+
+  /// Asks for the motion permission while the app is in the foreground.
+  @async
+  NativePermission requestStepsPermission();
 
   /// Asks for location permission while the app is in the foreground (the
   /// "when in use" level is enough to record a workout). Resolves with the

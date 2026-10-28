@@ -39,6 +39,7 @@ class FlutterTrackingGpsPlugin :
     private var fixesJob: Job? = null
     private var snapshotsJob: Job? = null
     private var pendingPermission: ((Result<NativePermission>) -> Unit)? = null
+    private var pendingStepsPermission: ((Result<NativePermission>) -> Unit)? = null
 
     // ── FlutterPlugin ───────────────────────────────────────────────────────
 
@@ -61,6 +62,7 @@ class FlutterTrackingGpsPlugin :
         scope?.cancel()
         scope = null
         pendingPermission = null
+        pendingStepsPermission = null
         appContext = null
     }
 
@@ -136,6 +138,13 @@ class FlutterTrackingGpsPlugin :
         permissions: Array<out String>,
         grantResults: IntArray,
     ): Boolean {
+        if (requestCode == STEPS_REQUEST_CODE) {
+            val stepsCallback = pendingStepsPermission ?: return true
+            pendingStepsPermission = null
+            val context = appContext
+            stepsCallback(Result.success(if (context == null) NativePermission.DENIED else currentStepsPermission(context)))
+            return true
+        }
         if (requestCode != REQUEST_CODE) return false
         val callback = pendingPermission ?: return true
         pendingPermission = null
@@ -155,6 +164,63 @@ class FlutterTrackingGpsPlugin :
         return if (enabled) NativePermission.GRANTED else NativePermission.SERVICES_DISABLED
     }
 
+    // ── Step sensor permission ──────────────────────────────────────────────
+
+    override fun stepsPermissionStatus(): NativePermission {
+        val context = appContext ?: return NativePermission.DENIED
+        return currentStepsPermission(context)
+    }
+
+    override fun requestStepsPermission(callback: (Result<NativePermission>) -> Unit) {
+        val context = appContext
+        val activity: Activity? = activityBinding?.activity
+        if (context == null || activity == null) {
+            callback(
+                Result.failure(
+                    flutterError(TrackingErrorCode.NO_ACTIVITY, "requesting a permission needs a foreground activity"),
+                ),
+            )
+            return
+        }
+        if (currentStepsPermission(context) == NativePermission.GRANTED) {
+            callback(Result.success(NativePermission.GRANTED))
+            return
+        }
+        if (pendingPermission != null || pendingStepsPermission != null) {
+            callback(
+                Result.failure(
+                    flutterError(TrackingErrorCode.PERMISSION_REQUEST_PENDING, "a permission request is already open"),
+                ),
+            )
+            return
+        }
+        pendingStepsPermission = callback
+        try {
+            ActivityCompat.requestPermissions(
+                activity, arrayOf(Manifest.permission.ACTIVITY_RECOGNITION), STEPS_REQUEST_CODE,
+            )
+        } catch (e: RuntimeException) {
+            pendingStepsPermission = null
+            callback(
+                Result.failure(
+                    e.toFlutterError(TrackingErrorCode.PERMISSION_REQUEST_FAILED, "could not ask for the permission"),
+                ),
+            )
+        }
+    }
+
+    /** Before Android 10 `ACTIVITY_RECOGNITION` is not a runtime permission. */
+    private fun currentStepsPermission(context: Context): NativePermission {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return NativePermission.GRANTED
+        return if (ContextCompat.checkSelfPermission(context, Manifest.permission.ACTIVITY_RECOGNITION) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            NativePermission.GRANTED
+        } else {
+            NativePermission.DENIED
+        }
+    }
+
     // ── Session commands ────────────────────────────────────────────────────
 
     override fun start(config: StartConfig, callback: (Result<NativeSnapshot>) -> Unit) {
@@ -163,7 +229,7 @@ class FlutterTrackingGpsPlugin :
                 engine.markPermissionDenied()
                 return@command engine.snapshot()
             }
-            startService(context, config)
+            if (config.foregroundMode == NativeForegroundMode.BUILT_IN) startService(context, config)
             engine.start(config)
         }
     }
@@ -195,6 +261,7 @@ class FlutterTrackingGpsPlugin :
             fixCount = 0,
             updatedAtMs = System.currentTimeMillis(),
             distance = emptyDistance(),
+            stepsStatus = NativeStepsStatus.OFF,
         )
         return TrackingRuntime.engine(context).snapshot()
     }
@@ -331,5 +398,6 @@ class FlutterTrackingGpsPlugin :
 
     private companion object {
         const val REQUEST_CODE = 7421
+        const val STEPS_REQUEST_CODE = 7422
     }
 }

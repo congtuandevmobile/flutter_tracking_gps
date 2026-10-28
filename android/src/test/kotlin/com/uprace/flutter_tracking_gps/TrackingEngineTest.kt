@@ -44,6 +44,24 @@ private class FakeSource : LocationSource {
     suspend fun push(l: RawLocation) = channel.emit(l)
 }
 
+private class FakeSteps(var status: NativeStepsStatus = NativeStepsStatus.ACTIVE) : StepSource {
+    private val channel = MutableSharedFlow<StepSample>(extraBufferCapacity = 256)
+    @Volatile var collectors = 0
+
+    override fun status(): NativeStepsStatus = status
+
+    override fun counts(): Flow<StepSample> = flow {
+        collectors += 1
+        try {
+            emitAll(channel)
+        } finally {
+            collectors -= 1
+        }
+    }
+
+    suspend fun push(raw: Long) = channel.emit(StepSample(raw, MONO))
+}
+
 private class MemoryStore : FixStore {
     val fixes = Collections.synchronizedList(mutableListOf<NativeFix>())
     var failOnAppend = false
@@ -65,21 +83,22 @@ private fun engineConfig() = EngineConfig(
     maxAccuracyMeters = 40.0, maxFixAgeMs = 30_000, silenceAfterMs = 10_000, maxSpeedMps = 10.0,
     minStepMeters = 2.0, accuracyNoiseFactor = 0.5, stationarySpeedMps = 0.4, maxBridgeMs = 120_000,
     reanchorAfterRejects = 3, rejectMock = true, pdrEnabled = true, pdrConfirmRatio = 0.5,
-    kalman = false, stopRadiusMeters = 15.0, stopMinDwellMs = 30_000,
+    kalman = false, stopRadiusMeters = 15.0, stopMinDwellMs = 30_000, initialStrideMeters = -1.0,
 )
 
 private fun startConfig(id: String = "s", adaptive: Boolean = false) = StartConfig(
     sessionId = id, startSeq = 0, startSegmentId = 0, intervalMs = 1000, minDistanceMeters = 0.0,
     notificationTitle = "t", notificationText = "t", engine = engineConfig(),
     adaptiveSampling = adaptive, batterySaver = false,
+    stepsEnabled = false, initialSteps = 0, foregroundMode = NativeForegroundMode.BUILT_IN,
 )
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class TrackingEngineTest {
     private var clock = MONO
 
-    private fun engine(source: FakeSource, store: MemoryStore): TrackingEngine = TrackingEngine(
-        source = source, store = store,
+    private fun engine(source: FakeSource, store: MemoryStore, steps: StepSource = NoStepSource): TrackingEngine = TrackingEngine(
+        source = source, stepSource = steps, store = store,
         scope = CoroutineScope(UnconfinedTestDispatcher()),
         wallClockMs = { BASE + (clock - MONO) },
         monotonicMs = { clock },
@@ -254,5 +273,79 @@ class TrackingEngineTest {
         val s = engine.snapshot()
         assertTrue(abs(s.distance.totalMeters - 30.0) < 0.5, "was ${s.distance.totalMeters}")
         assertEquals(11L, s.fixCount)
+    }
+
+    private fun stepsConfig(id: String = "s", stride: Double = 1.0) = startConfig(id).copy(
+        stepsEnabled = true,
+        engine = engineConfig().copy(initialStrideMeters = stride),
+    )
+
+    @Test
+    fun stepsWhileGpsIsDegradedBecomeAPendingEstimateNotDistance() = runTest {
+        val source = FakeSource()
+        val steps = FakeSteps()
+        val engine = engine(source, MemoryStore(), steps)
+        engine.start(stepsConfig())
+        assertEquals(NativeStepsStatus.ACTIVE, engine.snapshot().stepsStatus)
+        source.push(loc(0.0, 0.0, speed = 3.0))
+        clock = MONO + 1000
+        source.push(loc(1.0, 3.0, speed = 3.0, accuracy = 90.0)) // GPS degraded
+        steps.push(10_000) // baseline
+        steps.push(10_030)
+        val s = engine.snapshot()
+        assertEquals(30L, s.distance.steps)
+        assertTrue(abs(s.distance.pendingPdrMeters - 30.0) < 1e-6, "pending ${s.distance.pendingPdrMeters}")
+        assertEquals(0.0, s.distance.totalMeters)
+    }
+
+    @Test
+    fun pauseUnregistersTheStepSensorAndResumeRegistersItAgain() = runTest {
+        val source = FakeSource()
+        val steps = FakeSteps()
+        val engine = engine(source, MemoryStore(), steps)
+        engine.start(stepsConfig())
+        assertEquals(1, steps.collectors)
+        engine.pause("s")
+        assertEquals(0, steps.collectors)
+        engine.resume("s")
+        assertEquals(1, steps.collectors)
+        engine.stop("s")
+        assertEquals(0, steps.collectors)
+    }
+
+    @Test
+    fun aMissingPermissionOnlyDisablesStepsTheRecordingGoesOn() = runTest {
+        val source = FakeSource()
+        val steps = FakeSteps(NativeStepsStatus.PERMISSION_DENIED)
+        val engine = engine(source, MemoryStore(), steps)
+        engine.start(stepsConfig())
+        source.push(loc(0.0, 0.0, speed = 3.0))
+        val s = engine.snapshot()
+        assertEquals(NativeStepsStatus.PERMISSION_DENIED, s.stepsStatus)
+        assertEquals(NativeTrackingState.RUNNING, s.state)
+        assertEquals(0, steps.collectors)
+    }
+
+    @Test
+    fun stepsOffByConfigNeverTouchTheSensor() = runTest {
+        val steps = FakeSteps()
+        val engine = engine(FakeSource(), MemoryStore(), steps)
+        engine.start(startConfig()) // stepsEnabled = false
+        assertEquals(NativeStepsStatus.OFF, engine.snapshot().stepsStatus)
+        assertEquals(0, steps.collectors)
+    }
+
+    @Test
+    fun walkedWhilePausedIsNotCountedAfterResume() = runTest {
+        val source = FakeSource()
+        val steps = FakeSteps()
+        val engine = engine(source, MemoryStore(), steps)
+        engine.start(stepsConfig())
+        steps.push(1000); steps.push(1040)
+        engine.pause("s")
+        engine.resume("s")
+        steps.push(1500) // 460 steps were walked while paused: a new baseline
+        steps.push(1510)
+        assertEquals(50L, engine.snapshot().distance.steps)
     }
 }

@@ -119,6 +119,28 @@ enum NativeTrackingState {
   error,
 }
 
+/// Whether the native step sensor is feeding the engine.
+enum NativeStepsStatus {
+  /// Not requested (`StartConfig.stepsEnabled` is false) or not started yet.
+  off,
+  active,
+  /// Motion permission (`ACTIVITY_RECOGNITION` on Android, Motion & Fitness on
+  /// iOS) is missing: the recording goes on without steps.
+  permissionDenied,
+  /// The device has no step sensor.
+  unavailable,
+}
+
+/// Who keeps the Android process alive while recording.
+enum NativeForegroundMode {
+  /// The SDK runs its own foreground service with a default notification
+  /// (distance and a chronometer). Survives the Flutter engine.
+  builtIn,
+  /// A third-party presenter (for example a live-activity plugin) owns a
+  /// foreground service. The SDK starts none. Ignored on iOS.
+  external,
+}
+
 enum NativeGpsQuality {
   unknown,
   good,
@@ -272,6 +294,7 @@ class EngineConfig {
     required this.kalman,
     required this.stopRadiusMeters,
     required this.stopMinDwellMs,
+    required this.initialStrideMeters,
   });
 
   double maxAccuracyMeters;
@@ -306,6 +329,10 @@ class EngineConfig {
 
   int stopMinDwellMs;
 
+  /// Metres per step to start from; zero or negative = none. Without a stride a
+  /// step count is not turned into a distance estimate until GPS taught one.
+  double initialStrideMeters;
+
   List<Object?> _toList() {
     return <Object?>[
       maxAccuracyMeters,
@@ -323,6 +350,7 @@ class EngineConfig {
       kalman,
       stopRadiusMeters,
       stopMinDwellMs,
+      initialStrideMeters,
     ];
   }
 
@@ -347,6 +375,7 @@ class EngineConfig {
       kalman: result[12]! as bool,
       stopRadiusMeters: result[13]! as double,
       stopMinDwellMs: result[14]! as int,
+      initialStrideMeters: result[15]! as double,
     );
   }
 
@@ -359,7 +388,7 @@ class EngineConfig {
     if (identical(this, other)) {
       return true;
     }
-    return _deepEquals(maxAccuracyMeters, other.maxAccuracyMeters) && _deepEquals(maxFixAgeMs, other.maxFixAgeMs) && _deepEquals(silenceAfterMs, other.silenceAfterMs) && _deepEquals(maxSpeedMps, other.maxSpeedMps) && _deepEquals(minStepMeters, other.minStepMeters) && _deepEquals(accuracyNoiseFactor, other.accuracyNoiseFactor) && _deepEquals(stationarySpeedMps, other.stationarySpeedMps) && _deepEquals(maxBridgeMs, other.maxBridgeMs) && _deepEquals(reanchorAfterRejects, other.reanchorAfterRejects) && _deepEquals(rejectMock, other.rejectMock) && _deepEquals(pdrEnabled, other.pdrEnabled) && _deepEquals(pdrConfirmRatio, other.pdrConfirmRatio) && _deepEquals(kalman, other.kalman) && _deepEquals(stopRadiusMeters, other.stopRadiusMeters) && _deepEquals(stopMinDwellMs, other.stopMinDwellMs);
+    return _deepEquals(maxAccuracyMeters, other.maxAccuracyMeters) && _deepEquals(maxFixAgeMs, other.maxFixAgeMs) && _deepEquals(silenceAfterMs, other.silenceAfterMs) && _deepEquals(maxSpeedMps, other.maxSpeedMps) && _deepEquals(minStepMeters, other.minStepMeters) && _deepEquals(accuracyNoiseFactor, other.accuracyNoiseFactor) && _deepEquals(stationarySpeedMps, other.stationarySpeedMps) && _deepEquals(maxBridgeMs, other.maxBridgeMs) && _deepEquals(reanchorAfterRejects, other.reanchorAfterRejects) && _deepEquals(rejectMock, other.rejectMock) && _deepEquals(pdrEnabled, other.pdrEnabled) && _deepEquals(pdrConfirmRatio, other.pdrConfirmRatio) && _deepEquals(kalman, other.kalman) && _deepEquals(stopRadiusMeters, other.stopRadiusMeters) && _deepEquals(stopMinDwellMs, other.stopMinDwellMs) && _deepEquals(initialStrideMeters, other.initialStrideMeters);
   }
 
   @override
@@ -369,6 +398,9 @@ class EngineConfig {
 
 class StartConfig {
   StartConfig({
+    required this.stepsEnabled,
+    required this.initialSteps,
+    required this.foregroundMode,
     required this.engine,
     required this.adaptiveSampling,
     required this.batterySaver,
@@ -380,6 +412,19 @@ class StartConfig {
     required this.notificationTitle,
     required this.notificationText,
   });
+
+  /// Count steps natively (Android `TYPE_STEP_COUNTER`, iOS `CMPedometer`) and
+  /// let the engine turn them into a pending estimate while GPS is weak. Without
+  /// the motion permission the recording goes on and `NativeSnapshot.stepsStatus`
+  /// says so.
+  bool stepsEnabled;
+
+  /// Session steps to restore after a process death (the device counter is never
+  /// added to it); 0 for a new session.
+  int initialSteps;
+
+  /// Android only: who holds the foreground service (see [NativeForegroundMode]).
+  NativeForegroundMode foregroundMode;
 
   /// How the native engine measures distance.
   EngineConfig engine;
@@ -416,6 +461,9 @@ class StartConfig {
 
   List<Object?> _toList() {
     return <Object?>[
+      stepsEnabled,
+      initialSteps,
+      foregroundMode,
       engine,
       adaptiveSampling,
       batterySaver,
@@ -435,16 +483,19 @@ class StartConfig {
   static StartConfig decode(Object result) {
     result as List<Object?>;
     return StartConfig(
-      engine: result[0]! as EngineConfig,
-      adaptiveSampling: result[1]! as bool,
-      batterySaver: result[2]! as bool,
-      sessionId: result[3]! as String,
-      startSeq: result[4]! as int,
-      startSegmentId: result[5]! as int,
-      intervalMs: result[6]! as int,
-      minDistanceMeters: result[7]! as double,
-      notificationTitle: result[8]! as String,
-      notificationText: result[9]! as String,
+      stepsEnabled: result[0]! as bool,
+      initialSteps: result[1]! as int,
+      foregroundMode: result[2]! as NativeForegroundMode,
+      engine: result[3]! as EngineConfig,
+      adaptiveSampling: result[4]! as bool,
+      batterySaver: result[5]! as bool,
+      sessionId: result[6]! as String,
+      startSeq: result[7]! as int,
+      startSegmentId: result[8]! as int,
+      intervalMs: result[9]! as int,
+      minDistanceMeters: result[10]! as double,
+      notificationTitle: result[11]! as String,
+      notificationText: result[12]! as String,
     );
   }
 
@@ -457,7 +508,7 @@ class StartConfig {
     if (identical(this, other)) {
       return true;
     }
-    return _deepEquals(engine, other.engine) && _deepEquals(adaptiveSampling, other.adaptiveSampling) && _deepEquals(batterySaver, other.batterySaver) && _deepEquals(sessionId, other.sessionId) && _deepEquals(startSeq, other.startSeq) && _deepEquals(startSegmentId, other.startSegmentId) && _deepEquals(intervalMs, other.intervalMs) && _deepEquals(minDistanceMeters, other.minDistanceMeters) && _deepEquals(notificationTitle, other.notificationTitle) && _deepEquals(notificationText, other.notificationText);
+    return _deepEquals(stepsEnabled, other.stepsEnabled) && _deepEquals(initialSteps, other.initialSteps) && _deepEquals(foregroundMode, other.foregroundMode) && _deepEquals(engine, other.engine) && _deepEquals(adaptiveSampling, other.adaptiveSampling) && _deepEquals(batterySaver, other.batterySaver) && _deepEquals(sessionId, other.sessionId) && _deepEquals(startSeq, other.startSeq) && _deepEquals(startSegmentId, other.startSegmentId) && _deepEquals(intervalMs, other.intervalMs) && _deepEquals(minDistanceMeters, other.minDistanceMeters) && _deepEquals(notificationTitle, other.notificationTitle) && _deepEquals(notificationText, other.notificationText);
   }
 
   @override
@@ -478,6 +529,8 @@ class NativeDistance {
     required this.isStopped,
     required this.speedMps,
     required this.lastAcceptedFixAtMs,
+    required this.steps,
+    required this.strideMeters,
   });
 
   NativeGpsQuality quality;
@@ -504,6 +557,12 @@ class NativeDistance {
   /// Measurement time of the latest accepted fix; negative = none yet.
   int lastAcceptedFixAtMs;
 
+  /// Accepted steps of the session (zero without a step sensor).
+  int steps;
+
+  /// Learned or configured metres per step; negative = unknown.
+  double strideMeters;
+
   List<Object?> _toList() {
     return <Object?>[
       quality,
@@ -516,6 +575,8 @@ class NativeDistance {
       isStopped,
       speedMps,
       lastAcceptedFixAtMs,
+      steps,
+      strideMeters,
     ];
   }
 
@@ -535,6 +596,8 @@ class NativeDistance {
       isStopped: result[7]! as bool,
       speedMps: result[8]! as double,
       lastAcceptedFixAtMs: result[9]! as int,
+      steps: result[10]! as int,
+      strideMeters: result[11]! as double,
     );
   }
 
@@ -547,7 +610,7 @@ class NativeDistance {
     if (identical(this, other)) {
       return true;
     }
-    return _deepEquals(quality, other.quality) && _deepEquals(totalMeters, other.totalMeters) && _deepEquals(gpsMeters, other.gpsMeters) && _deepEquals(gapBridgeMeters, other.gapBridgeMeters) && _deepEquals(pdrMeters, other.pdrMeters) && _deepEquals(pendingPdrMeters, other.pendingPdrMeters) && _deepEquals(movingTimeMs, other.movingTimeMs) && _deepEquals(isStopped, other.isStopped) && _deepEquals(speedMps, other.speedMps) && _deepEquals(lastAcceptedFixAtMs, other.lastAcceptedFixAtMs);
+    return _deepEquals(quality, other.quality) && _deepEquals(totalMeters, other.totalMeters) && _deepEquals(gpsMeters, other.gpsMeters) && _deepEquals(gapBridgeMeters, other.gapBridgeMeters) && _deepEquals(pdrMeters, other.pdrMeters) && _deepEquals(pendingPdrMeters, other.pendingPdrMeters) && _deepEquals(movingTimeMs, other.movingTimeMs) && _deepEquals(isStopped, other.isStopped) && _deepEquals(speedMps, other.speedMps) && _deepEquals(lastAcceptedFixAtMs, other.lastAcceptedFixAtMs) && _deepEquals(steps, other.steps) && _deepEquals(strideMeters, other.strideMeters);
   }
 
   @override
@@ -557,6 +620,7 @@ class NativeDistance {
 
 class NativeSnapshot {
   NativeSnapshot({
+    required this.stepsStatus,
     this.sessionId,
     required this.state,
     required this.segmentId,
@@ -566,6 +630,9 @@ class NativeSnapshot {
     required this.updatedAtMs,
     this.error,
   });
+
+  /// State of the native step sensor.
+  NativeStepsStatus stepsStatus;
 
   String? sessionId;
 
@@ -587,6 +654,7 @@ class NativeSnapshot {
 
   List<Object?> _toList() {
     return <Object?>[
+      stepsStatus,
       sessionId,
       state,
       segmentId,
@@ -604,14 +672,15 @@ class NativeSnapshot {
   static NativeSnapshot decode(Object result) {
     result as List<Object?>;
     return NativeSnapshot(
-      sessionId: result[0] as String?,
-      state: result[1]! as NativeTrackingState,
-      segmentId: result[2]! as int,
-      distance: result[3]! as NativeDistance,
-      fixCount: result[4]! as int,
-      lastFixTimeMs: result[5] as int?,
-      updatedAtMs: result[6]! as int,
-      error: result[7] as String?,
+      stepsStatus: result[0]! as NativeStepsStatus,
+      sessionId: result[1] as String?,
+      state: result[2]! as NativeTrackingState,
+      segmentId: result[3]! as int,
+      distance: result[4]! as NativeDistance,
+      fixCount: result[5]! as int,
+      lastFixTimeMs: result[6] as int?,
+      updatedAtMs: result[7]! as int,
+      error: result[8] as String?,
     );
   }
 
@@ -624,7 +693,7 @@ class NativeSnapshot {
     if (identical(this, other)) {
       return true;
     }
-    return _deepEquals(sessionId, other.sessionId) && _deepEquals(state, other.state) && _deepEquals(segmentId, other.segmentId) && _deepEquals(distance, other.distance) && _deepEquals(fixCount, other.fixCount) && _deepEquals(lastFixTimeMs, other.lastFixTimeMs) && _deepEquals(updatedAtMs, other.updatedAtMs) && _deepEquals(error, other.error);
+    return _deepEquals(stepsStatus, other.stepsStatus) && _deepEquals(sessionId, other.sessionId) && _deepEquals(state, other.state) && _deepEquals(segmentId, other.segmentId) && _deepEquals(distance, other.distance) && _deepEquals(fixCount, other.fixCount) && _deepEquals(lastFixTimeMs, other.lastFixTimeMs) && _deepEquals(updatedAtMs, other.updatedAtMs) && _deepEquals(error, other.error);
   }
 
   @override
@@ -646,23 +715,29 @@ class _PigeonCodec extends StandardMessageCodec {
     }    else if (value is NativeTrackingState) {
       buffer.putUint8(130);
       writeValue(buffer, value.index);
-    }    else if (value is NativeGpsQuality) {
+    }    else if (value is NativeStepsStatus) {
       buffer.putUint8(131);
       writeValue(buffer, value.index);
-    }    else if (value is NativeFix) {
+    }    else if (value is NativeForegroundMode) {
       buffer.putUint8(132);
-      writeValue(buffer, value.encode());
-    }    else if (value is EngineConfig) {
+      writeValue(buffer, value.index);
+    }    else if (value is NativeGpsQuality) {
       buffer.putUint8(133);
-      writeValue(buffer, value.encode());
-    }    else if (value is StartConfig) {
+      writeValue(buffer, value.index);
+    }    else if (value is NativeFix) {
       buffer.putUint8(134);
       writeValue(buffer, value.encode());
-    }    else if (value is NativeDistance) {
+    }    else if (value is EngineConfig) {
       buffer.putUint8(135);
       writeValue(buffer, value.encode());
-    }    else if (value is NativeSnapshot) {
+    }    else if (value is StartConfig) {
       buffer.putUint8(136);
+      writeValue(buffer, value.encode());
+    }    else if (value is NativeDistance) {
+      buffer.putUint8(137);
+      writeValue(buffer, value.encode());
+    }    else if (value is NativeSnapshot) {
+      buffer.putUint8(138);
       writeValue(buffer, value.encode());
     } else {
       super.writeValue(buffer, value);
@@ -680,16 +755,22 @@ class _PigeonCodec extends StandardMessageCodec {
         return value == null ? null : NativeTrackingState.values[value];
       case 131:
         final value = readValue(buffer) as int?;
-        return value == null ? null : NativeGpsQuality.values[value];
+        return value == null ? null : NativeStepsStatus.values[value];
       case 132:
-        return NativeFix.decode(readValue(buffer)!);
+        final value = readValue(buffer) as int?;
+        return value == null ? null : NativeForegroundMode.values[value];
       case 133:
-        return EngineConfig.decode(readValue(buffer)!);
+        final value = readValue(buffer) as int?;
+        return value == null ? null : NativeGpsQuality.values[value];
       case 134:
-        return StartConfig.decode(readValue(buffer)!);
+        return NativeFix.decode(readValue(buffer)!);
       case 135:
-        return NativeDistance.decode(readValue(buffer)!);
+        return EngineConfig.decode(readValue(buffer)!);
       case 136:
+        return StartConfig.decode(readValue(buffer)!);
+      case 137:
+        return NativeDistance.decode(readValue(buffer)!);
+      case 138:
         return NativeSnapshot.decode(readValue(buffer)!);
       default:
         return super.readValueOfType(type, buffer);
@@ -714,6 +795,48 @@ class TrackingHostApi {
 
   Future<NativePermission> permissionStatus() async {
     final pigeonVar_channelName = 'dev.flutter.pigeon.flutter_tracking_gps.TrackingHostApi.permissionStatus$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(null);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+
+    final Object? pigeonVar_replyValue = _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: false,
+    )
+    ;
+    return pigeonVar_replyValue! as NativePermission;
+  }
+
+  /// Motion permission for the step sensor: `ACTIVITY_RECOGNITION` (Android 10+)
+  /// or Motion & Fitness (iOS). [NativePermission.granted] when the device needs
+  /// none.
+  Future<NativePermission> stepsPermissionStatus() async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.flutter_tracking_gps.TrackingHostApi.stepsPermissionStatus$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(null);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+
+    final Object? pigeonVar_replyValue = _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: false,
+    )
+    ;
+    return pigeonVar_replyValue! as NativePermission;
+  }
+
+  /// Asks for the motion permission while the app is in the foreground.
+  Future<NativePermission> requestStepsPermission() async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.flutter_tracking_gps.TrackingHostApi.requestStepsPermission$pigeonVar_messageChannelSuffix';
     final pigeonVar_channel = BasicMessageChannel<Object?>(
       pigeonVar_channelName,
       pigeonChannelCodec,

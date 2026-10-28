@@ -32,3 +32,5 @@ cd example/ios
 xcodebuild test -workspace Runner.xcworkspace -scheme Runner \
   -destination 'platform=iOS Simulator,id=<simulator id>' CODE_SIGNING_ALLOWED=NO
 ```
+
+Added step tests with a `FakeSteps` provider: weak-GPS steps become a pending estimate (not distance), steps off by config never start the sensor, a missing motion permission only disables steps, pause ends the subscription and the exact OS count corrects the total (a later reading is ignored), resume starts a fresh count and keeps the total.

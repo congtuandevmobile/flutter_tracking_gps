@@ -12,6 +12,7 @@ func makeCoreBridge(_ e: EngineConfig, adaptiveSampling: Bool, batterySaver: Boo
         maxBridgeMs: e.maxBridgeMs, reanchorAfterRejects: Int32(e.reanchorAfterRejects),
         rejectMock: e.rejectMock, pdrEnabled: e.pdrEnabled, pdrConfirmRatio: e.pdrConfirmRatio,
         kalman: e.kalman, stopRadiusMeters: e.stopRadiusMeters, stopMinDwellMs: e.stopMinDwellMs,
+        initialStrideMeters: e.initialStrideMeters,
         adaptiveSampling: adaptiveSampling, batterySaver: batterySaver)
 }
 
@@ -36,6 +37,7 @@ func monotonicNowMs() -> Int64 { Int64(clock_gettime_nsec_np(CLOCK_MONOTONIC) / 
 final class TrackingEngine: LocationProviderDelegate {
     private let provider: LocationProviding
     private let store: FixStoring
+    private let steps: StepProviding
     private let coreFactory: (EngineConfig, Bool, Bool) -> TrackingCoreBridge
     private let monotonicMs: () -> Int64
     private let wallNow: () -> Date
@@ -59,10 +61,16 @@ final class TrackingEngine: LocationProviderDelegate {
     private var lastError: String?
     private var minDistanceMeters: Double = 0
     private var adaptive = false
+    private var stepsEnabled = false
+    private var stepsStatus: NativeStepsStatus = .off
+    private var stepSegmentStart: Date?
+    /// Bumped whenever the step subscription ends, so a reading queued before it cannot reach a later segment.
+    private var stepGeneration = 0
     private var permissionWaiters: [(NativePermission) -> Void] = []
 
     init(
         provider: LocationProviding, store: FixStoring,
+        steps: StepProviding = CoreMotionStepProvider(),
         coreFactory: @escaping (EngineConfig, Bool, Bool) -> TrackingCoreBridge = {
             makeCoreBridge($0, adaptiveSampling: $1, batterySaver: $2)
         },
@@ -71,6 +79,7 @@ final class TrackingEngine: LocationProviderDelegate {
     ) {
         self.provider = provider
         self.store = store
+        self.steps = steps
         self.coreFactory = coreFactory
         self.monotonicMs = monotonicMs
         self.wallNow = wallNow
@@ -98,6 +107,13 @@ final class TrackingEngine: LocationProviderDelegate {
         }
     }
 
+    /// Motion & Fitness permission for the step sensor.
+    func stepsPermissionStatus() -> NativePermission { steps.permission }
+
+    func requestStepsPermission(completion: @escaping (NativePermission) -> Void) {
+        steps.requestPermission { status in DispatchQueue.main.async { completion(status) } }
+    }
+
     // MARK: - Session
 
     func snapshot() -> NativeSnapshot {
@@ -122,8 +138,12 @@ final class TrackingEngine: LocationProviderDelegate {
             self.lastError = nil
             self.minDistanceMeters = config.minDistanceMeters
             self.adaptive = config.adaptiveSampling
+            self.stepsEnabled = config.stepsEnabled
+            self.endSteps()
             let bridge = self.coreFactory(config.engine, config.adaptiveSampling, config.batterySaver)
-            bridge.start(sessionId: config.sessionId, atMs: self.monotonicMs(), segmentId: Int32(config.startSegmentId))
+            bridge.start(
+                sessionId: config.sessionId, atMs: self.monotonicMs(), segmentId: Int32(config.startSegmentId),
+                initialSteps: config.initialSteps)
             self.core = bridge
             guard self.provider.permission == .granted else {
                 self.state = .permissionDenied
@@ -135,6 +155,7 @@ final class TrackingEngine: LocationProviderDelegate {
                 try self.provider.startUpdates(minDistanceMeters: self.minDistanceMeters)
                 self.state = .running
                 self.startTicker()
+                self.beginSteps()
                 self.publish()
                 self.deliver(.success(self.makeSnapshot()), to: completion)
             } catch TrackingNativeError.missingBackgroundMode {
@@ -168,6 +189,7 @@ final class TrackingEngine: LocationProviderDelegate {
                 self.stopTicker()
                 self.state = .paused
                 self.core?.pause(atMs: self.monotonicMs())
+                self.closeStepSegment()
                 self.publish()
             }
             self.deliver(.success(self.makeSnapshot()), to: completion)
@@ -187,6 +209,7 @@ final class TrackingEngine: LocationProviderDelegate {
                 try self.provider.startUpdates(minDistanceMeters: self.minDistanceMeters)
                 self.state = .running
                 self.startTicker()
+                self.beginSteps()
                 self.publish()
                 self.deliver(.success(self.makeSnapshot()), to: completion)
             } catch {
@@ -210,6 +233,7 @@ final class TrackingEngine: LocationProviderDelegate {
                 self.stopTicker()
                 self.state = .stopped
                 self.core?.finish(atMs: self.monotonicMs())
+                self.closeStepSegment()
                 self.publish()
             }
             self.deliver(.success(self.makeSnapshot()), to: completion)
@@ -256,7 +280,7 @@ final class TrackingEngine: LocationProviderDelegate {
                 var lastSeq: Int64 = -1
                 bridge.start(
                     sessionId: config.sessionId, atMs: persisted.first?.elapsedMs ?? self.monotonicMs(),
-                    segmentId: Int32(segment))
+                    segmentId: Int32(segment), initialSteps: config.initialSteps)
                 for fix in persisted {
                     if fix.segmentId != segment {
                         bridge.pause(atMs: fix.elapsedMs)
@@ -275,6 +299,8 @@ final class TrackingEngine: LocationProviderDelegate {
                 self.core = bridge
                 self.sessionId = config.sessionId
                 self.adaptive = config.adaptiveSampling
+                self.stepsEnabled = config.stepsEnabled
+                self.stepsStatus = .off
                 self.minDistanceMeters = config.minDistanceMeters
                 self.segmentId = segment
                 self.seq = lastSeq + 1
@@ -414,8 +440,62 @@ final class TrackingEngine: LocationProviderDelegate {
         tickTimer = nil
     }
 
+    // MARK: - Steps (queue)
+
+    /// Starts counting steps for the segment that just opened. A missing sensor or
+    /// permission only sets `stepsStatus`: the recording goes on.
+    private func beginSteps() {
+        guard stepsEnabled else {
+            stepsStatus = .off
+            return
+        }
+        stepsStatus = steps.status
+        guard stepsStatus == .active else { return }
+        stepGeneration += 1
+        let generation = stepGeneration
+        let segment = Int32(segmentId)
+        let start = wallNow()
+        stepSegmentStart = start
+        steps.startUpdates(from: start) { [weak self] count in
+            self?.queue.async { [weak self] in
+                guard let self = self, generation == self.stepGeneration, self.state == .running else { return }
+                _ = self.core?.onSegmentSteps(segmentId: segment, atMs: self.monotonicMs(), segmentSteps: count)
+                self.publish()
+            }
+        }
+    }
+
+    /// Ends the live subscription (a new session replaces an open one).
+    private func endSteps() {
+        stepGeneration += 1
+        steps.stopUpdates()
+        stepSegmentStart = nil
+    }
+
+    /// Ends the live subscription at a pause or stop and replaces the segment's
+    /// live count with the OS's exact count up to the boundary. The result only
+    /// corrects the displayed total, never distance, and is dropped when another
+    /// segment has been closed meanwhile.
+    private func closeStepSegment() {
+        let start = stepSegmentStart
+        let closedSegment = segmentId
+        let boundary = wallNow()
+        endSteps()
+        guard stepsEnabled, stepsStatus == .active, let start = start else { return }
+        steps.query(from: start, to: boundary) { [weak self] exact in
+            self?.queue.async { [weak self] in
+                guard let self = self, let exact = exact, self.segmentId == closedSegment,
+                    self.state != .running
+                else { return }
+                self.core?.correctClosedSegment(exactSteps: exact)
+                self.publish()
+            }
+        }
+    }
+
     private func makeSnapshot() -> NativeSnapshot {
         NativeSnapshot(
+            stepsStatus: stepsStatus,
             sessionId: sessionId, state: state, segmentId: segmentId, distance: makeDistance(),
             fixCount: fixCount, lastFixTimeMs: lastFixTimeMs,
             updatedAtMs: Int64((wallNow().timeIntervalSince1970 * 1000).rounded()), error: lastError)
@@ -435,12 +515,14 @@ final class TrackingEngine: LocationProviderDelegate {
             quality: quality, totalMeters: s.totalMeters, gpsMeters: s.gpsMeters,
             gapBridgeMeters: s.gapBridgeMeters, pdrMeters: s.pdrMeters,
             pendingPdrMeters: s.pendingPdrMeters, movingTimeMs: s.movingTimeMs, isStopped: s.isStopped,
-            speedMps: s.speedMps, lastAcceptedFixAtMs: s.lastFixAtMs)
+            speedMps: s.speedMps, lastAcceptedFixAtMs: s.lastFixAtMs, steps: s.steps,
+            strideMeters: s.strideMeters)
     }
 
     static let emptyDistance = NativeDistance(
         quality: .unknown, totalMeters: 0, gpsMeters: 0, gapBridgeMeters: 0, pdrMeters: 0,
-        pendingPdrMeters: 0, movingTimeMs: 0, isStopped: false, speedMps: -1, lastAcceptedFixAtMs: -1)
+        pendingPdrMeters: 0, movingTimeMs: 0, isStopped: false, speedMps: -1, lastAcceptedFixAtMs: -1,
+        steps: 0, strideMeters: -1)
 
     private func publish() {
         let snapshot = makeSnapshot()

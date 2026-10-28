@@ -69,3 +69,10 @@ The anchor only moves when distance is credited (or on a recovery or re-anchor),
 
 ## Uses / tested by
 Uses `DistanceLedger`, `TrackingLog`, `Kalman2D`, `OutlierRejector`, `GapReconciler`, `StopDetector`, `GeoMath`. Tested by `EngineTest`, `AuditProofTest` and `FixtureParityTest`.
+
+## Steps (`onSteps`)
+`onSteps(segmentId, atMs, steps)` takes a **delta**, not a running total (the bridge computes it with `StepSession`).
+- GPS **good**: the steps go to the `StrideEstimator` together with the GPS metres of the same window. They are **not** distance.
+- GPS **not good** and a stride known: `steps * stride` becomes a **pending** estimate, exactly like `submitPdr`; it only counts if the GPS that returns corroborates it (`GapReconciler`). No known stride (none configured, none learned yet) = nothing is estimated.
+- Refused: other segment, not running, non-positive delta. The learning window is dropped at pause, resume, finish and recovery. `start` returns to `config.initialStrideMeters`.
+`submitPdr` stays for an app that has its own estimate. Snapshot field `strideMeters`.

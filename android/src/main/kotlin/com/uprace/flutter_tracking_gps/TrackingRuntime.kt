@@ -22,6 +22,7 @@ internal object TrackingRuntime {
 
     private fun createEngine(appContext: Context): TrackingEngine = TrackingEngine(
         source = FusedLocationSource(appContext),
+        stepSource = SensorStepSource(appContext),
         store = FileFixStore(File(appContext.filesDir, STORE_DIRECTORY)),
         scope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
     )
