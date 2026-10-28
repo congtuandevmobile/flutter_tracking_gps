@@ -16,7 +16,7 @@ final session = gps.createSession(
 
 | | No presenter (default) | With a presenter |
 |---|---|---|
-| **Android** | The SDK runs its own foreground service (type `location`) with an ongoing notification: title, distance and a self-ticking chronometer. It keeps updating from native snapshots, even when the Flutter engine is gone. This is what keeps the process, and so the recording, alive. | Same, **plus** whatever the presenter shows, unless `ownsAndroidForegroundService` is true (below). |
+| **Android** | The SDK runs its own foreground service (type `location`) with a plain ongoing notification. Title and text come from `createSession(notificationTitle:, notificationText:)` (default text: "Tracking your activity. Tap to return to the app."); tapping it opens the app. No live data. This is what keeps the process, and so the recording, alive, even when the Flutter engine is gone. | Same, **plus** whatever the presenter shows, unless `ownsAndroidForegroundService` is true (below). |
 | **iOS** | Nothing extra. Background recording is kept alive by the `location` background mode. | The presenter drives the Live Activity. |
 
 ## `TrackingPresenter`
@@ -37,7 +37,7 @@ abstract class TrackingPresenter {
   `createSession(onPresenterError: ...)` (default: a `dart:developer` log).
 - A presenter lives in the Flutter isolate. If the engine is destroyed while
   recording, it stops being called; native keeps recording and, on Android, the
-  SDK's own notification keeps updating. iOS Live Activities cannot be updated by
+  SDK's own notification stays. iOS Live Activities cannot be updated by
   native code of this package, so they freeze until the app returns.
 
 ### `ownsAndroidForegroundService`

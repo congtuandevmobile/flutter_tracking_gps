@@ -34,4 +34,5 @@ and `docs/NATIVE_RULES.md` before touching `android/` or `ios/`.
   estimate is always PENDING until returning GPS confirms it. See `docs/FLOW.md`.
 - Live activity / notification: the SDK depends on no such package; apps plug one
   in through `TrackingPresenter` (`docs/PRESENTER.md`). The Android default
-  notification is native (`TrackingService`) so it survives the Flutter engine.
+  notification is a plain native foreground notification (`TrackingService`,
+  text from Flutter) so it survives the Flutter engine.

@@ -10,7 +10,8 @@
   `requestStepsPermission()`. Dart reference twin and tests added.
 * **`TrackingPresenter`** hook for a third-party live activity / notification
   (`createSession(presenter: ...)`, `docs/PRESENTER.md`). Android now has a default
-  foreground notification (distance + chronometer, updated by native); a presenter
+  foreground notification (plain text set from Flutter via `notificationTitle` /
+  `notificationText`, tap returns to the app; it keeps the process alive); a presenter
   that owns a foreground service can replace it (`ownsAndroidForegroundService`).
 * Pigeon: `StartConfig.stepsEnabled/initialSteps/foregroundMode`,
   `EngineConfig.initialStrideMeters`, `NativeDistance.steps/strideMeters`,

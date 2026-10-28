@@ -37,7 +37,7 @@ class FlutterTrackingGps {
     bool adaptiveSampling = false,
     bool batterySaver = false,
     String notificationTitle = 'Recording',
-    String notificationText = 'Tracking your activity',
+    String notificationText = 'Tracking your activity. Tap to return to the app.',
     bool stepsEnabled = false,
     int initialSteps = 0,
     TrackingPresenter? presenter,

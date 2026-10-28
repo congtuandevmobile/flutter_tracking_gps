@@ -24,7 +24,7 @@ class TrackingSession {
     this.adaptiveSampling = false,
     this.batterySaver = false,
     this.notificationTitle = 'Recording',
-    this.notificationText = 'Tracking your activity',
+    this.notificationText = 'Tracking your activity. Tap to return to the app.',
     this.stepsEnabled = false,
     this.initialSteps = 0,
     this.presenter,
@@ -38,6 +38,9 @@ class TrackingSession {
   /// limit consistent). Starting value, not measured on devices.
   final bool adaptiveSampling;
   final bool batterySaver;
+  /// Android default notification (ignored on iOS and when the presenter owns the
+  /// foreground service). Shown as is while recording; tapping it returns to the
+  /// app. No live data is shown in it.
   final String notificationTitle;
   final String notificationText;
 

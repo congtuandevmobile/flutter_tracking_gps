@@ -58,8 +58,8 @@ final session = gps.createSession(
 
 Steps never become distance on their own: while GPS is weak they make a pending
 estimate that only counts as far as the GPS that returns confirms it. Without a
-presenter, Android shows the SDK's own foreground notification (it keeps the
-recording alive); a third-party live activity plugs in through
+presenter, Android shows the SDK's own plain foreground notification (text from
+`notificationText`, it keeps the recording alive); a third-party live activity plugs in through
 `TrackingPresenter`.
 
 ## Setup
