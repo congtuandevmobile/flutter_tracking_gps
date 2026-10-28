@@ -54,8 +54,8 @@ class TrackingConfig {
     this.recoveryStepEvidenceAfter = const Duration(seconds: 30),
   });
 
-  /// Speed ceiling per sport (m/s). Running 10 and cycling 25 are the values
-  /// the UpRace app uses today.
+  /// Speed ceiling per sport (m/s): running 10 and cycling 25 (starting values,
+  /// not measured ones).
   factory TrackingConfig.forSport(TrackingSport sport) => TrackingConfig(
     maxSpeedMps: switch (sport) {
       TrackingSport.cycling => 25,

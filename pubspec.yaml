@@ -1,6 +1,6 @@
 name: flutter_tracking_gps
-description: "Own GPS tracking engine for UpRace: native fix collection (iOS CoreLocation, Android Fused + foreground service) whose distance is decided by a shared Kotlin core (a Dart twin of the engine exists as a reference and test oracle)."
-version: 0.0.1-beta
+description: "Own GPS tracking engine: native fix collection (iOS CoreLocation, Android Fused + foreground service) whose distance is decided by a shared Kotlin core (a Dart twin of the engine exists as a reference and test oracle)."
+version: 0.0.1-beta.1
 repository: https://github.com/congtuandevmobile/flutter_tracking_gps
 
 environment:
@@ -37,7 +37,7 @@ flutter:
   plugin:
     platforms:
       android:
-        package: com.uprace.flutter_tracking_gps
+        package: io.github.congtuandevmobile.flutter_tracking_gps
         pluginClass: FlutterTrackingGpsPlugin
       ios:
         pluginClass: FlutterTrackingGpsPlugin

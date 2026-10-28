@@ -11,7 +11,7 @@
 
     <application>
         <service
-            android:name="com.uprace.flutter_tracking_gps.TrackingService"
+            android:name="io.github.congtuandevmobile.flutter_tracking_gps.TrackingService"
             android:exported="false"
             android:foregroundServiceType="location" />
     </application>

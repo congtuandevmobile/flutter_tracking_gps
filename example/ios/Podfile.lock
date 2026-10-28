@@ -1,6 +1,6 @@
 PODS:
   - Flutter (1.0.0)
-  - flutter_tracking_gps (0.0.1-beta):
+  - flutter_tracking_gps (0.0.1-beta.1):
     - Flutter
   - integration_test (0.0.1):
     - Flutter
@@ -20,7 +20,7 @@ EXTERNAL SOURCES:
 
 SPEC CHECKSUMS:
   Flutter: cabc95a1d2626b1b06e7179b784ebcf0c0cde467
-  flutter_tracking_gps: 236cbefacdcbd20a71548c7c09d8ec57e900487f
+  flutter_tracking_gps: 3fbb223761c9c8ad9871c73dc5beeab8bf9f4b73
   integration_test: 4a889634ef21a45d28d50d622cf412dc6d9f586e
 
 PODFILE CHECKSUM: e30f02f9d1c72c47bb6344a0a748c9d268180865

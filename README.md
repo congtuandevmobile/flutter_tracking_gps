@@ -1,6 +1,6 @@
 # flutter_tracking_gps
 
-Own GPS tracking engine for UpRace. Native code collects raw fixes and keeps them
+Own GPS tracking engine. Native code collects raw fixes and keeps them
 on disk (iOS CoreLocation; Android Fused location inside a foreground service);
 a deterministic distance engine (shared Kotlin core, `tracking-core`) running
 natively decides what counts as distance; Dart sends commands and shows the

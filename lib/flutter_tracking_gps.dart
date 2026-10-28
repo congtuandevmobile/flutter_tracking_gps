@@ -1,4 +1,4 @@
-/// Own GPS tracking engine for UpRace.
+/// Own GPS tracking engine.
 ///
 /// Native code collects raw fixes (iOS CoreLocation, Android Fused location in
 /// a foreground service) and journals them; a shared Kotlin core (the same code

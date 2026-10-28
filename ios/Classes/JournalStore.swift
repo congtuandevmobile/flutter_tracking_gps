@@ -154,7 +154,7 @@ final class FileJournalStore: JournalStoring {
 /// everything queued is on disk. Nothing else touches the file.
 final class FileJournalSink: DurableSink {
     private let file: URL
-    private let queue = DispatchQueue(label: "com.uprace.flutter_tracking_gps.journal", qos: .utility)
+    private let queue = DispatchQueue(label: "io.github.congtuandevmobile.flutter_tracking_gps.journal", qos: .utility)
     private let stateLock = NSLock()
     private var handle: FileHandle?
     private var closed = false

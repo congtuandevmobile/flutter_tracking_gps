@@ -1,7 +1,6 @@
 # flutter_tracking_gps
 
-Own GPS tracking engine for UpRace (a planned replacement of
-`flutter_background_geolocation`). Read `doc/FLOW.md` before changing the engine
+Own GPS tracking engine. Read `doc/FLOW.md` before changing the engine
 and `doc/NATIVE_RULES.md` before touching `android/` or `ios/`.
 
 - The distance rules live in `tracking-core` (Kotlin, shipped) and have a Dart

@@ -4,12 +4,12 @@
 #
 Pod::Spec.new do |s|
   s.name             = 'flutter_tracking_gps'
-  s.version          = '0.0.1-beta'
+  s.version          = '0.0.1-beta.1'
   s.summary          = 'Own GPS tracking engine for Flutter.'
   s.description      = <<-DESC
 Own GPS tracking engine for Flutter.
                        DESC
-  s.homepage         = 'https://code.vng.vn/newuprace/mobileapp/uprace-package'
+  s.homepage         = 'https://github.com/congtuandevmobile/flutter_tracking_gps'
   s.license          = { :file => '../LICENSE' }
   s.author           = { 'Nguyễn Công Tuấn' => 'nguyencongtuan.devmobile@gmail.com' }
   s.source           = { :path => '.' }

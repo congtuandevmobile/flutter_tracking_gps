@@ -4,7 +4,7 @@ plugins {
     kotlin("multiplatform") version "2.2.20"
 }
 
-group = "com.uprace.tracker"
+group = "io.github.congtuandevmobile.tracker"
 version = "0.0.1-beta"
 
 kotlin {

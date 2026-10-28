@@ -1,4 +1,4 @@
-group = "com.uprace.flutter_tracking_gps"
+group = "io.github.congtuandevmobile.flutter_tracking_gps"
 version = "1.0-SNAPSHOT"
 
 buildscript {
@@ -27,7 +27,7 @@ plugins {
 }
 
 android {
-    namespace = "com.uprace.flutter_tracking_gps"
+    namespace = "io.github.congtuandevmobile.flutter_tracking_gps"
 
     compileSdk = 36
 

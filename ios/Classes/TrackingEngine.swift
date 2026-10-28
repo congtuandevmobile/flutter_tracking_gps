@@ -45,8 +45,8 @@ final class TrackingEngine: LocationProviderDelegate {
     private let steps: StepProviding
     private let monotonicMs: () -> Int64
     private let wallNow: () -> Date
-    private let queue = DispatchQueue(label: "com.uprace.flutter_tracking_gps.engine", qos: .userInitiated)
-    private let storeQueue = DispatchQueue(label: "com.uprace.flutter_tracking_gps.store", qos: .utility)
+    private let queue = DispatchQueue(label: "io.github.congtuandevmobile.flutter_tracking_gps.engine", qos: .userInitiated)
+    private let storeQueue = DispatchQueue(label: "io.github.congtuandevmobile.flutter_tracking_gps.store", qos: .utility)
 
     /// Receives each fix on the main thread. Set by the plugin while attached.
     var fixObserver: ((NativeFix) -> Void)?

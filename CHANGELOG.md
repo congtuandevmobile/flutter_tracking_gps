@@ -1,3 +1,13 @@
+## v0.0.1-beta.1
+
+Identity cleanup, no behaviour change. The Android/Kotlin package, the plugin `package:`
+entry, the Android service actions, the Dart/Swift queue labels, the Kotlin core group, the
+example app ids and the package homepage now use a neutral name
+(`io.github.congtuandevmobile.flutter_tracking_gps`); the description and the docs no
+longer name any product. **Android consumers:** the plugin's package changed, so any
+reference to the old package (for example a ProGuard rule or a manifest entry written by
+hand) must be updated.
+
 ## v0.0.1-beta
 
 First beta. **Not tested on a physical device yet** (battery, background
