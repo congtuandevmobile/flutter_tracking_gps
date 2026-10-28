@@ -25,3 +25,6 @@ Not thread-safe: one serial context. Tested by `JournalTest` (`JournalReplayTest
 
 ## Updated
 `restore(sink, lines)` no longer takes "now": a session that was running is paused at the time of the LAST journaled event. `RestoreResult` adds `engineVersion` and `engineChanged`. New `reprocess(lines, settings?)` recomputes with the current rules (optionally other settings) and writes nothing.
+
+## Finality (updated)
+`markFinalized(stepsFinal)` journals a `Finalized` record after `finish` (and any `correctClosedSegment`). `RestoreResult` adds `finished` and `stepsFinal`: a journal that ends at `Finish` restores as a finished, read-only session with the same finality; one cut between `Finish` and `Finalized` has provisional steps.

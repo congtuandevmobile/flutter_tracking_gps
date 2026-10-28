@@ -6,7 +6,9 @@ import TrackingCore
 protocol DurableSink: JournalSink {
     /// The first write failure, or nil. A failure never stops the recording; the engine shows it in the snapshot.
     var failure: Error? { get }
-    /// Lines accepted by `append` that are not on disk yet. Zero means everything appended is durable.
+    /// Lines accepted by `append` that are not DURABLE yet: queued, or written to the OS but not yet
+    /// synchronized to disk. Zero means everything appended survives even a power loss. (A process
+    /// crash alone loses only the queued ones: the OS keeps what was written.)
     var pending: Int { get }
     /// Drains the queue and releases the file.
     func close()
@@ -122,7 +124,12 @@ final class FileJournalSink: DurableSink {
     private var handle: FileHandle?
     private var closed = false
     private var firstFailure: Error?
+    /// Accepted and not yet synchronized to disk (queued + written-but-unsynced). Guarded by `stateLock`.
     private var queued = 0
+    // Only touched on `queue`.
+    private var unsynced = 0
+    private var syncScheduled = false
+    private static let syncInterval: TimeInterval = 1
 
     init(file: URL) { self.file = file }
 
@@ -153,10 +160,7 @@ final class FileJournalSink: DurableSink {
     }
 
     func flush() {
-        queue.sync { [weak self] in
-            guard let self = self else { return }
-            do { try self.handle?.synchronize() } catch { self.record(error) }
-        }
+        queue.sync { [weak self] in self?.sync() }
     }
 
     func close() {
@@ -169,7 +173,7 @@ final class FileJournalSink: DurableSink {
         stateLock.unlock()
         queue.sync { [weak self] in
             guard let self = self else { return }
-            do { try self.handle?.synchronize() } catch { self.record(error) }
+            self.sync()
             try? self.handle?.close()
             self.handle = nil
         }
@@ -177,12 +181,26 @@ final class FileJournalSink: DurableSink {
 
     // MARK: - Private (queue)
 
-    private func write(_ line: String) {
-        defer {
-            stateLock.lock()
-            queued -= 1
-            stateLock.unlock()
+    /// Synchronizes what was written to disk; only then is it durable and no longer "pending".
+    private func sync() {
+        do { try handle?.synchronize() } catch { record(error) }
+        stateLock.lock()
+        queued -= unsynced
+        stateLock.unlock()
+        unsynced = 0
+    }
+
+    private func scheduleSync() {
+        guard !syncScheduled else { return }
+        syncScheduled = true
+        queue.asyncAfter(deadline: .now() + Self.syncInterval) { [weak self] in
+            guard let self = self else { return }
+            self.syncScheduled = false
+            if self.unsynced > 0 { self.sync() }
         }
+    }
+
+    private func write(_ line: String) {
         do {
             if handle == nil {
                 try FileManager.default.createDirectory(
@@ -195,10 +213,15 @@ final class FileJournalSink: DurableSink {
                 handle = h
             }
             try handle?.write(contentsOf: Data((line + "\n").utf8))
+            unsynced += 1
+            scheduleSync()
         } catch {
             // Recording goes on; the loss is visible in the snapshot.
             NSLog("[flutter_tracking_gps] journal write failed: %@", String(describing: error))
             record(error)
+            stateLock.lock()
+            queued -= 1  // not retried: it is no longer pending, it is lost
+            stateLock.unlock()
         }
     }
 

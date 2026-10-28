@@ -40,6 +40,7 @@ class PlatformDistance {
     this.uncreditedGap = Duration.zero,
     this.uncreditedGaps = 0,
     this.ambiguousSteps = 0,
+    this.distanceEligibleSteps = 0,
   });
 
   const PlatformDistance.empty()
@@ -59,7 +60,8 @@ class PlatformDistance {
       bridgedGap = Duration.zero,
       uncreditedGap = Duration.zero,
       uncreditedGaps = 0,
-      ambiguousSteps = 0;
+      ambiguousSteps = 0,
+      distanceEligibleSteps = 0;
 
   final GpsQuality quality;
   final double totalMeters;
@@ -82,6 +84,7 @@ class PlatformDistance {
   final Duration uncreditedGap;
   final int uncreditedGaps;
   final int ambiguousSteps;
+  final int distanceEligibleSteps;
 }
 
 class PlatformSnapshot {
@@ -93,6 +96,8 @@ class PlatformSnapshot {
     this.stepsStatus = StepsStatus.off,
     this.stepsFinal = false,
     this.journalPending = 0,
+    this.restoreState = RestoreState.notRestored,
+    this.engineChanged = false,
     this.sessionId,
     this.error,
   });
@@ -107,6 +112,8 @@ class PlatformSnapshot {
 
   /// Events accepted but not on disk yet (see `TrackingSnapshot.isDurable`).
   final int journalPending;
+  final RestoreState restoreState;
+  final bool engineChanged;
   final String? error;
 }
 
@@ -173,4 +180,7 @@ abstract interface class TrackingPlatform {
 
   /// The ids of the sessions persisted on this device (recovery after a kill).
   Future<List<String>> listSessions();
+
+  /// Android: replaces the text of the SDK's foreground notification. No-op on iOS.
+  Future<void> updateNotification(String title, String text);
 }

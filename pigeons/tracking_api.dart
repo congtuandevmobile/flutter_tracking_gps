@@ -59,6 +59,23 @@ enum NativeStepsStatus {
   failed,
 }
 
+/// What a restore found in the session's journal.
+enum NativeRestoreState {
+  /// The snapshot was not produced by a restore.
+  notRestored,
+
+  /// Every record was intact.
+  complete,
+
+  /// Only the last record was incomplete (a kill mid-write) and was dropped.
+  tailRepaired,
+
+  /// A record before the last was damaged: ONLY the part before it was restored;
+  /// everything after it was NOT applied (the original file is kept as
+  /// `<file>.corrupt`). The result is partial and says so.
+  partial,
+}
+
 /// One raw location reading, exactly as the platform produced it. No filter,
 /// no smoothing, no odometer: the Dart engine decides what counts as distance.
 class NativeFix {
@@ -260,6 +277,7 @@ class NativeDistance {
     required this.uncreditedGapMs,
     required this.uncreditedGaps,
     required this.ambiguousSteps,
+    required this.distanceEligibleSteps,
   });
 
   NativeGpsQuality quality;
@@ -299,8 +317,14 @@ class NativeDistance {
   int uncreditedGapMs;
   int uncreditedGaps;
 
-  /// Steps measured in a batch that straddles a GPS-quality change: used for nothing.
+  /// Steps measured in a batch that straddles a GPS-quality change: kept in the
+  /// total and in the journal, used for no estimate.
   int ambiguousSteps;
+
+  /// Steps that taught the stride or became a pending estimate. `steps` is what
+  /// the platform reported for the active segments; this is the part that was
+  /// ELIGIBLE to be used for distance.
+  int distanceEligibleSteps;
 }
 
 class NativeSnapshot {
@@ -313,6 +337,8 @@ class NativeSnapshot {
     required this.stepsStatus,
     required this.stepsFinal,
     required this.journalPending,
+    required this.restoreState,
+    required this.engineChanged,
     this.sessionId,
     this.lastFixTimeMs,
     this.error,
@@ -320,6 +346,13 @@ class NativeSnapshot {
 
   /// State of the native step sensor.
   NativeStepsStatus stepsStatus;
+
+  /// What the last restore found; [NativeRestoreState.notRestored] otherwise.
+  NativeRestoreState restoreState;
+
+  /// The journal was recorded with other engine rules than this code's: the
+  /// restored numbers may differ from what was shown live.
+  bool engineChanged;
 
   /// Events accepted by the engine that are NOT on disk yet (queued for the
   /// journal writer). Zero means everything shown here is durable; a crash while
@@ -409,6 +442,12 @@ abstract class TrackingHostApi {
   /// the writer first, so nothing re-creates the file afterwards.
   @async
   void clearSession(String sessionId);
+
+  /// Android only: replaces the text of the SDK's foreground notification while a
+  /// session records. The SDK keeps the channel, the tap action and the lifecycle;
+  /// a presenter that wants a richer notification calls this instead of posting its
+  /// own with the SDK's id. A no-op on iOS and when no session records.
+  void updateNotification(String title, String text);
 
   /// The ids of the sessions persisted on this device (for recovery after a kill).
   @async

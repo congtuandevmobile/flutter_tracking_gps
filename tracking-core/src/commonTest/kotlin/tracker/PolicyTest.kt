@@ -221,3 +221,50 @@ class TrustedPdrPolicyTest {
         assertEquals(before, e.totalMeters, "a configured stride alone is not calibration")
     }
 }
+
+class DriftAndStepAccountingTest {
+    @Test fun slowGpsDriftWithUnknownSpeedAndGoodLookingAccuracyIsNeverDistance() {
+        val e = engine()
+        e.onFix(fixAt(0, 0.0, 0.0, accuracy = 5.0), ms(0.0))
+        // A phone on a table: the position walks away at 0.2 m/s (24 m in 2 minutes), no Doppler, accuracy "good".
+        for (t in 1..120) e.onFix(fixAt(t.toLong(), t.toDouble(), t * 0.2, accuracy = 5.0), ms(t.toDouble()))
+        assertEquals(0.0, e.totalMeters, "drift below the stationary speed must not accumulate")
+    }
+
+    @Test fun driftFasterThanTheStationarySpeedCannotBeToldFromSlowWalkingWithoutDoppler() {
+        // The documented limit, pinned so nobody believes the gate does more than it does.
+        val e = engine()
+        e.onFix(fixAt(0, 0.0, 0.0, accuracy = 5.0), ms(0.0))
+        for (t in 1..120) e.onFix(fixAt(t.toLong(), t.toDouble(), t * 0.6, accuracy = 5.0), ms(t.toDouble()))
+        assertTrue(e.totalMeters > 50.0, "0.6 m/s with no Doppler is credited: was ${e.totalMeters}")
+    }
+
+    @Test fun theDisplacementSpeedOnlyEverBlocksItNeverConfirmsMovement() {
+        val e = engine()
+        e.onFix(fixAt(0, 0.0, 0.0, accuracy = 5.0), ms(0.0))
+        // 2 m in 4 s = 0.5 m/s is above the limit: not blocked by the speed gate, but still has to clear the noise radius.
+        val v = e.onFix(fixAt(1, 4.0, 2.0, accuracy = 5.0), ms(4.0)).verdict
+        assertEquals(FixVerdict.NOISE, v)
+    }
+
+    @Test fun stepsAreSplitIntoReportedAttributedAndEligible() {
+        val e = engine(TrackingConfig(initialStrideMeters = 1.0))
+        for (t in 0..10) e.onFix(fixAt(t.toLong(), t.toDouble(), t * 3.0, speed = 3.0), ms(t.toDouble()))
+        e.onSteps(0, ms(2.0), ms(8.0), ms(9.0), 12) // wholly good: teaches the stride
+        e.onFix(fixAt(11, 12.0, 33.0, accuracy = 90.0), ms(12.0))
+        e.onSteps(0, ms(11.0), ms(14.0), ms(15.0), 6) // wholly weak with a stride: a pending estimate
+        e.onSteps(0, ms(8.0), ms(13.0), ms(15.5), 10) // straddles the change: ambiguous
+        val s = e.snapshot
+        assertEquals(10L, s.ambiguousSteps)
+        assertEquals(18L, s.distanceEligibleSteps, "12 taught the stride + 6 became pending; the ambiguous 10 did not")
+    }
+
+    @Test fun aWeakBatchThatArrivesAfterGpsReturnedIsNotEligible() {
+        val e = engine(TrackingConfig(initialStrideMeters = 1.0))
+        for (t in 0..10) e.onFix(fixAt(t.toLong(), t.toDouble(), t * 3.0, speed = 3.0), ms(t.toDouble()))
+        e.onFix(fixAt(11, 12.0, 33.0, accuracy = 90.0), ms(12.0))
+        e.onFix(fixAt(12, 16.0, 48.0, speed = 3.0), ms(16.0))
+        e.onSteps(0, ms(11.0), ms(14.0), ms(20.0), 6)
+        assertEquals(0L, e.snapshot.distanceEligibleSteps)
+    }
+}

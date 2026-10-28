@@ -92,6 +92,11 @@ internal class TrackingEngine(
     @Volatile private var lastError: String? = null
     @Volatile private var stepsStatus = NativeStepsStatus.OFF
     @Volatile private var extras: Map<String, String> = emptyMap()
+    @Volatile private var restoreState = NativeRestoreState.NOT_RESTORED
+    @Volatile private var engineChanged = false
+
+    /** Set by a restore of a FINISHED session: whether its step total was settled. Null for a live session. */
+    @Volatile private var restoredStepsFinal: Boolean? = null
     private var seq = 0L
     private var collector: Job? = null
     private var ticker: Job? = null
@@ -111,8 +116,10 @@ internal class TrackingEngine(
         val error = lastError ?: failure?.let { "${TrackingErrorCode.STORE_WRITE_FAILED}: ${it.message ?: "I/O error"}" }
         return NativeSnapshot(
             stepsStatus = stepsStatus,
-            stepsFinal = state == NativeTrackingState.STOPPED,
+            stepsFinal = state == NativeTrackingState.STOPPED && (restoredStepsFinal ?: true),
             journalPending = (sink?.pending ?: 0).toLong(),
+            restoreState = restoreState,
+            engineChanged = engineChanged,
             state = state,
             segmentId = segmentId,
             fixCount = fixCount,
@@ -149,6 +156,9 @@ internal class TrackingEngine(
             lastFixTimeMs = null
             lastError = null
             extras = newExtras
+            restoreState = NativeRestoreState.NOT_RESTORED
+            engineChanged = false
+            restoredStepsFinal = null
             adaptive = config.adaptiveSampling
             stepsEnabled = config.stepsEnabled
             request = Request(config.intervalMs, config.minDistanceMeters.toFloat())
@@ -195,7 +205,11 @@ internal class TrackingEngine(
             // FINISHING until the journal is durable: nothing published meanwhile may pass for final.
             synchronized(coreLock) {
                 state = NativeTrackingState.FINISHING
-                coreStrict { it.finish(monotonicMs()) }
+                coreStrict {
+                    it.finish(monotonicMs())
+                    // Android has no exact-count query: the live count is all there is, and it is final.
+                    it.markFinalized(true)
+                }
             }
             publish()
             withContext(Dispatchers.IO) { recorder?.flush() }
@@ -269,7 +283,20 @@ internal class TrackingEngine(
                 JournalStatus.TRUNCATED_TAIL -> "${TrackingErrorCode.JOURNAL_REPAIRED}: the last record was incomplete and was dropped"
                 else -> "${TrackingErrorCode.JOURNAL_CORRUPT}: damage at line ${contents.damagedLine}; only the intact part was restored"
             }
-            state = NativeTrackingState.PAUSED
+            engineChanged = result.engineChanged
+            restoreState = when (contents.status) {
+                JournalStatus.OK -> NativeRestoreState.COMPLETE
+                JournalStatus.TRUNCATED_TAIL -> NativeRestoreState.TAIL_REPAIRED
+                else -> NativeRestoreState.PARTIAL
+            }
+            // A journal that ended at Finish is a finished session: read-only, never "paused".
+            if (result.finished) {
+                restoredStepsFinal = result.stepsFinal
+                state = NativeTrackingState.STOPPED
+            } else {
+                restoredStepsFinal = null
+                state = NativeTrackingState.PAUSED
+            }
         }
         publish()
         snapshot()
@@ -504,6 +531,7 @@ internal class TrackingEngine(
             uncreditedGapMs = s.uncreditedGapMs,
             uncreditedGaps = s.uncreditedGaps.toLong(),
             ambiguousSteps = s.ambiguousSteps,
+            distanceEligibleSteps = s.distanceEligibleSteps,
         )
     }
 
@@ -553,4 +581,5 @@ internal fun emptyDistance(): NativeDistance = NativeDistance(
     uncreditedGapMs = 0,
     uncreditedGaps = 0,
     ambiguousSteps = 0,
+    distanceEligibleSteps = 0,
 )

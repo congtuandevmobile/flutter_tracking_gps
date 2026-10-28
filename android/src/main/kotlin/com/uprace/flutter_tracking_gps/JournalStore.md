@@ -17,3 +17,5 @@ Blocking I/O: call from `Dispatchers.IO`. Tested by `FileJournalStoreTest` and, 
 
 ## Updated
 `DurableSink.pending` counts lines queued but not on disk (public as `journalPending`). `rewrite(id, lines, keepBackup)` copies the original to `<name>.corrupt` first when the damage was in the MIDDLE of the file.
+
+`pending` now counts lines that are not DURABLE: queued, or written but not `fsync`ed. The writer syncs after a write when a second passed, when idle, and at every barrier.

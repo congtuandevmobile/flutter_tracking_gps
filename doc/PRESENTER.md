@@ -26,12 +26,18 @@ recording is unaffected.
 
 ### Showing ONE notification (Android)
 
-To avoid two notifications, a presenter can update the SDK's notification instead
-of posting its own: post with the same id and channel (`NOTIFICATION_ID` 7421 and
-`CHANNEL_ID` `flutter_tracking_gps`, public constants of `TrackingService`).
-Android replaces the content in place. That needs a small option in the
-presenter's own plugin ("update this notification id, do not start a service");
-the SDK cannot do it for it.
+The SDK OWNS its notification: the channel, the tap action, the minimal content and the
+lifecycle. A presenter never posts with the SDK's id itself. To show something richer in
+that one notification it calls the SDK:
+
+```dart
+await session.updateNotification(title: 'Running', text: '5.2 km · 31:07');
+```
+
+Android replaces the text in place; the SDK keeps everything else. It is a no-op on iOS and
+when no session records. If the presenter fails or its engine dies, the last text stays and
+the service keeps running. (Actions and richer layouts would be added to this API, not left to
+each presenter.)
 
 ## `TrackingPresenter`
 

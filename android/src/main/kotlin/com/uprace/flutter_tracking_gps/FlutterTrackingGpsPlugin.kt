@@ -274,6 +274,8 @@ class FlutterTrackingGpsPlugin :
             stepsStatus = NativeStepsStatus.OFF,
             stepsFinal = false,
             journalPending = 0,
+            restoreState = NativeRestoreState.NOT_RESTORED,
+            engineChanged = false,
         )
         return TrackingRuntime.engine(context).snapshot()
     }
@@ -287,6 +289,11 @@ class FlutterTrackingGpsPlugin :
         command(callback, TrackingErrorCode.RESTORE_FAILED, "could not restore the session") { _, engine ->
             engine.restore(config)
         }
+    }
+
+    override fun updateNotification(title: String, text: String) {
+        // The SDK owns the notification (channel, tap action, lifecycle); this only changes its text.
+        TrackingService.update(title, text)
     }
 
     override fun listSessions(callback: (Result<List<String>>) -> Unit) {

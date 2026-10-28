@@ -20,14 +20,34 @@ import androidx.core.app.NotificationCompat
  * data: the [TrackingEngine] does the work.
  *
  * The SDK ALWAYS runs it while a session records, so the recording never depends on a
- * third party to keep the process alive. A presenter that wants a richer surface
- * can replace this notification's content by posting with the same notification id
- * ([NOTIFICATION_ID]) and channel ([CHANNEL_ID]); if it fails or its engine dies,
- * this one stays.
+ * third party to keep the process alive. The SDK also OWNS the notification (channel,
+ * tap action, lifecycle, minimal content): a presenter changes its text through the
+ * SDK ([update], exposed to Dart as `updateNotification`) and never posts with the
+ * SDK's id itself. If the presenter fails or its engine dies, this one stays.
  */
 class TrackingService : Service() {
+    private var title = DEFAULT_TITLE
+    private var text = DEFAULT_TEXT
+
+    override fun onCreate() {
+        super.onCreate()
+        instance = this
+    }
+
+    override fun onDestroy() {
+        if (instance === this) instance = null
+        super.onDestroy()
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    /** Replaces the text of the foreground notification (the channel, tap action and lifecycle stay the SDK's). */
+    private fun show(newTitle: String, newText: String) {
+        title = newTitle
+        text = newText
+        val manager = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+        manager?.notify(NOTIFICATION_ID, buildNotification(title, text))
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
@@ -35,8 +55,8 @@ class TrackingService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        val title = intent?.getStringExtra(EXTRA_TITLE) ?: DEFAULT_TITLE
-        val text = intent?.getStringExtra(EXTRA_TEXT) ?: DEFAULT_TEXT
+        title = intent?.getStringExtra(EXTRA_TITLE) ?: DEFAULT_TITLE
+        text = intent?.getStringExtra(EXTRA_TEXT) ?: DEFAULT_TEXT
         // Must run within seconds of startForegroundService().
         startForegroundCompat(buildNotification(title, text))
         // Not sticky: after a process kill there is no session to continue, and
@@ -85,13 +105,20 @@ class TrackingService : Service() {
     }
 
     companion object {
+        @Volatile private var instance: TrackingService? = null
+
+        /** Changes the text of the running notification; a no-op when no session records. */
+        fun update(title: String, text: String) {
+            instance?.show(title, text)
+        }
+
         const val ACTION_START = "com.uprace.flutter_tracking_gps.START"
         const val ACTION_STOP = "com.uprace.flutter_tracking_gps.STOP"
         const val EXTRA_TITLE = "title"
         const val EXTRA_TEXT = "text"
-        const val CHANNEL_ID = "flutter_tracking_gps"
+        private const val CHANNEL_ID = "flutter_tracking_gps"
         private const val CHANNEL_NAME = "Activity recording"
-        const val NOTIFICATION_ID = 7421
+        private const val NOTIFICATION_ID = 7421
         private const val DEFAULT_TITLE = "Recording"
         private const val DEFAULT_TEXT = "Tracking your activity. Tap to return to the app."
     }

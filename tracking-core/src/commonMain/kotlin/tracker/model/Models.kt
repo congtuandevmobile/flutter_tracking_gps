@@ -168,6 +168,8 @@ data class TrackingSnapshot(
     /** GPS gaps and unmeasured intervals that were NOT credited: their time. */
     val uncreditedGapMs: Long = 0,
     val uncreditedGaps: Int = 0,
-    /** Steps measured in a batch that straddles a GPS-quality change: used for nothing. */
+    /** Steps measured in a batch that straddles a GPS-quality change: kept in the total, used for no estimate. */
     val ambiguousSteps: Long = 0,
+    /** Steps that taught the stride or became a pending estimate. */
+    val distanceEligibleSteps: Long = 0,
 )

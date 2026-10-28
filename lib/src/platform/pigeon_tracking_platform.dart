@@ -141,6 +141,10 @@ class PigeonTrackingPlatform implements TrackingPlatform {
   @override
   Future<List<String>> listSessions() => _api.listSessions();
 
+  @override
+  Future<void> updateNotification(String title, String text) =>
+      _api.updateNotification(title, text);
+
   static TrackingFix _toFix(NativeFix f) => TrackingFix(
     sessionId: f.sessionId,
     segmentId: f.segmentId,
@@ -241,6 +245,13 @@ class PigeonTrackingPlatform implements TrackingPlatform {
     },
     stepsFinal: s.stepsFinal,
     journalPending: s.journalPending,
+    restoreState: switch (s.restoreState) {
+      NativeRestoreState.notRestored => RestoreState.notRestored,
+      NativeRestoreState.complete => RestoreState.complete,
+      NativeRestoreState.tailRepaired => RestoreState.tailRepaired,
+      NativeRestoreState.partial => RestoreState.partial,
+    },
+    engineChanged: s.engineChanged,
     error: s.error,
   );
 
@@ -270,5 +281,6 @@ class PigeonTrackingPlatform implements TrackingPlatform {
     uncreditedGap: Duration(milliseconds: d.uncreditedGapMs),
     uncreditedGaps: d.uncreditedGaps,
     ambiguousSteps: d.ambiguousSteps,
+    distanceEligibleSteps: d.distanceEligibleSteps,
   );
 }

@@ -136,6 +136,20 @@ enum NativeStepsStatus {
   failed,
 }
 
+/// What a restore found in the session's journal.
+enum NativeRestoreState {
+  /// The snapshot was not produced by a restore.
+  notRestored,
+  /// Every record was intact.
+  complete,
+  /// Only the last record was incomplete (a kill mid-write) and was dropped.
+  tailRepaired,
+  /// A record before the last was damaged: ONLY the part before it was restored;
+  /// everything after it was NOT applied (the original file is kept as
+  /// `<file>.corrupt`). The result is partial and says so.
+  partial,
+}
+
 enum NativeGpsQuality {
   unknown,
   good,
@@ -539,6 +553,7 @@ class NativeDistance {
     required this.uncreditedGapMs,
     required this.uncreditedGaps,
     required this.ambiguousSteps,
+    required this.distanceEligibleSteps,
   });
 
   NativeGpsQuality quality;
@@ -584,8 +599,14 @@ class NativeDistance {
 
   int uncreditedGaps;
 
-  /// Steps measured in a batch that straddles a GPS-quality change: used for nothing.
+  /// Steps measured in a batch that straddles a GPS-quality change: kept in the
+  /// total and in the journal, used for no estimate.
   int ambiguousSteps;
+
+  /// Steps that taught the stride or became a pending estimate. `steps` is what
+  /// the platform reported for the active segments; this is the part that was
+  /// ELIGIBLE to be used for distance.
+  int distanceEligibleSteps;
 
   List<Object?> _toList() {
     return <Object?>[
@@ -606,6 +627,7 @@ class NativeDistance {
       uncreditedGapMs,
       uncreditedGaps,
       ambiguousSteps,
+      distanceEligibleSteps,
     ];
   }
 
@@ -632,6 +654,7 @@ class NativeDistance {
       uncreditedGapMs: result[14]! as int,
       uncreditedGaps: result[15]! as int,
       ambiguousSteps: result[16]! as int,
+      distanceEligibleSteps: result[17]! as int,
     );
   }
 
@@ -644,7 +667,7 @@ class NativeDistance {
     if (identical(this, other)) {
       return true;
     }
-    return _deepEquals(quality, other.quality) && _deepEquals(totalMeters, other.totalMeters) && _deepEquals(gpsMeters, other.gpsMeters) && _deepEquals(gapBridgeMeters, other.gapBridgeMeters) && _deepEquals(pdrMeters, other.pdrMeters) && _deepEquals(pendingPdrMeters, other.pendingPdrMeters) && _deepEquals(movingTimeMs, other.movingTimeMs) && _deepEquals(isStopped, other.isStopped) && _deepEquals(speedMps, other.speedMps) && _deepEquals(lastAcceptedFixAtMs, other.lastAcceptedFixAtMs) && _deepEquals(steps, other.steps) && _deepEquals(strideMeters, other.strideMeters) && _deepEquals(activeTimeMs, other.activeTimeMs) && _deepEquals(bridgedGapMs, other.bridgedGapMs) && _deepEquals(uncreditedGapMs, other.uncreditedGapMs) && _deepEquals(uncreditedGaps, other.uncreditedGaps) && _deepEquals(ambiguousSteps, other.ambiguousSteps);
+    return _deepEquals(quality, other.quality) && _deepEquals(totalMeters, other.totalMeters) && _deepEquals(gpsMeters, other.gpsMeters) && _deepEquals(gapBridgeMeters, other.gapBridgeMeters) && _deepEquals(pdrMeters, other.pdrMeters) && _deepEquals(pendingPdrMeters, other.pendingPdrMeters) && _deepEquals(movingTimeMs, other.movingTimeMs) && _deepEquals(isStopped, other.isStopped) && _deepEquals(speedMps, other.speedMps) && _deepEquals(lastAcceptedFixAtMs, other.lastAcceptedFixAtMs) && _deepEquals(steps, other.steps) && _deepEquals(strideMeters, other.strideMeters) && _deepEquals(activeTimeMs, other.activeTimeMs) && _deepEquals(bridgedGapMs, other.bridgedGapMs) && _deepEquals(uncreditedGapMs, other.uncreditedGapMs) && _deepEquals(uncreditedGaps, other.uncreditedGaps) && _deepEquals(ambiguousSteps, other.ambiguousSteps) && _deepEquals(distanceEligibleSteps, other.distanceEligibleSteps);
   }
 
   @override
@@ -655,6 +678,8 @@ class NativeDistance {
 class NativeSnapshot {
   NativeSnapshot({
     required this.stepsStatus,
+    required this.restoreState,
+    required this.engineChanged,
     required this.journalPending,
     required this.stepsFinal,
     this.sessionId,
@@ -669,6 +694,13 @@ class NativeSnapshot {
 
   /// State of the native step sensor.
   NativeStepsStatus stepsStatus;
+
+  /// What the last restore found; [NativeRestoreState.notRestored] otherwise.
+  NativeRestoreState restoreState;
+
+  /// The journal was recorded with other engine rules than this code's: the
+  /// restored numbers may differ from what was shown live.
+  bool engineChanged;
 
   /// Events accepted by the engine that are NOT on disk yet (queued for the
   /// journal writer). Zero means everything shown here is durable; a crash while
@@ -701,6 +733,8 @@ class NativeSnapshot {
   List<Object?> _toList() {
     return <Object?>[
       stepsStatus,
+      restoreState,
+      engineChanged,
       journalPending,
       stepsFinal,
       sessionId,
@@ -721,16 +755,18 @@ class NativeSnapshot {
     result as List<Object?>;
     return NativeSnapshot(
       stepsStatus: result[0]! as NativeStepsStatus,
-      journalPending: result[1]! as int,
-      stepsFinal: result[2]! as bool,
-      sessionId: result[3] as String?,
-      state: result[4]! as NativeTrackingState,
-      segmentId: result[5]! as int,
-      distance: result[6]! as NativeDistance,
-      fixCount: result[7]! as int,
-      lastFixTimeMs: result[8] as int?,
-      updatedAtMs: result[9]! as int,
-      error: result[10] as String?,
+      restoreState: result[1]! as NativeRestoreState,
+      engineChanged: result[2]! as bool,
+      journalPending: result[3]! as int,
+      stepsFinal: result[4]! as bool,
+      sessionId: result[5] as String?,
+      state: result[6]! as NativeTrackingState,
+      segmentId: result[7]! as int,
+      distance: result[8]! as NativeDistance,
+      fixCount: result[9]! as int,
+      lastFixTimeMs: result[10] as int?,
+      updatedAtMs: result[11]! as int,
+      error: result[12] as String?,
     );
   }
 
@@ -743,7 +779,7 @@ class NativeSnapshot {
     if (identical(this, other)) {
       return true;
     }
-    return _deepEquals(stepsStatus, other.stepsStatus) && _deepEquals(journalPending, other.journalPending) && _deepEquals(stepsFinal, other.stepsFinal) && _deepEquals(sessionId, other.sessionId) && _deepEquals(state, other.state) && _deepEquals(segmentId, other.segmentId) && _deepEquals(distance, other.distance) && _deepEquals(fixCount, other.fixCount) && _deepEquals(lastFixTimeMs, other.lastFixTimeMs) && _deepEquals(updatedAtMs, other.updatedAtMs) && _deepEquals(error, other.error);
+    return _deepEquals(stepsStatus, other.stepsStatus) && _deepEquals(restoreState, other.restoreState) && _deepEquals(engineChanged, other.engineChanged) && _deepEquals(journalPending, other.journalPending) && _deepEquals(stepsFinal, other.stepsFinal) && _deepEquals(sessionId, other.sessionId) && _deepEquals(state, other.state) && _deepEquals(segmentId, other.segmentId) && _deepEquals(distance, other.distance) && _deepEquals(fixCount, other.fixCount) && _deepEquals(lastFixTimeMs, other.lastFixTimeMs) && _deepEquals(updatedAtMs, other.updatedAtMs) && _deepEquals(error, other.error);
   }
 
   @override
@@ -768,23 +804,26 @@ class _PigeonCodec extends StandardMessageCodec {
     }    else if (value is NativeStepsStatus) {
       buffer.putUint8(131);
       writeValue(buffer, value.index);
-    }    else if (value is NativeGpsQuality) {
+    }    else if (value is NativeRestoreState) {
       buffer.putUint8(132);
       writeValue(buffer, value.index);
-    }    else if (value is NativeFix) {
+    }    else if (value is NativeGpsQuality) {
       buffer.putUint8(133);
-      writeValue(buffer, value.encode());
-    }    else if (value is EngineConfig) {
+      writeValue(buffer, value.index);
+    }    else if (value is NativeFix) {
       buffer.putUint8(134);
       writeValue(buffer, value.encode());
-    }    else if (value is StartConfig) {
+    }    else if (value is EngineConfig) {
       buffer.putUint8(135);
       writeValue(buffer, value.encode());
-    }    else if (value is NativeDistance) {
+    }    else if (value is StartConfig) {
       buffer.putUint8(136);
       writeValue(buffer, value.encode());
-    }    else if (value is NativeSnapshot) {
+    }    else if (value is NativeDistance) {
       buffer.putUint8(137);
+      writeValue(buffer, value.encode());
+    }    else if (value is NativeSnapshot) {
+      buffer.putUint8(138);
       writeValue(buffer, value.encode());
     } else {
       super.writeValue(buffer, value);
@@ -805,16 +844,19 @@ class _PigeonCodec extends StandardMessageCodec {
         return value == null ? null : NativeStepsStatus.values[value];
       case 132:
         final value = readValue(buffer) as int?;
-        return value == null ? null : NativeGpsQuality.values[value];
+        return value == null ? null : NativeRestoreState.values[value];
       case 133:
-        return NativeFix.decode(readValue(buffer)!);
+        final value = readValue(buffer) as int?;
+        return value == null ? null : NativeGpsQuality.values[value];
       case 134:
-        return EngineConfig.decode(readValue(buffer)!);
+        return NativeFix.decode(readValue(buffer)!);
       case 135:
-        return StartConfig.decode(readValue(buffer)!);
+        return EngineConfig.decode(readValue(buffer)!);
       case 136:
-        return NativeDistance.decode(readValue(buffer)!);
+        return StartConfig.decode(readValue(buffer)!);
       case 137:
+        return NativeDistance.decode(readValue(buffer)!);
+      case 138:
         return NativeSnapshot.decode(readValue(buffer)!);
       default:
         return super.readValueOfType(type, buffer);
@@ -1117,6 +1159,28 @@ class TrackingHostApi {
       binaryMessenger: pigeonVar_binaryMessenger,
     );
     final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[sessionId]);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+
+    _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: true,
+    )
+    ;
+  }
+
+  /// Android only: replaces the text of the SDK's foreground notification while a
+  /// session records. The SDK keeps the channel, the tap action and the lifecycle;
+  /// a presenter that wants a richer notification calls this instead of posting its
+  /// own with the SDK's id. A no-op on iOS and when no session records.
+  Future<void> updateNotification(String title, String text) async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.flutter_tracking_gps.TrackingHostApi.updateNotification$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[title, text]);
     final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
 
     _extractReplyValueOrThrow(

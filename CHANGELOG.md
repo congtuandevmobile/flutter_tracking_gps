@@ -31,16 +31,20 @@ starting value.
   stride, wholly weak becomes a pending estimate the returning GPS must confirm, a
   batch straddling a quality change is `ambiguousSteps` (kept in the step total and the
   journal, but not used for the stride or a pending estimate). A long
-  gap with a working sensor and no steps credits 0 m. Opt-in
+  gap with a working sensor that delivered no step event is not credited and is
+  reported as uncredited (absence of evidence, not proof of standing still). Opt-in
   `PdrPolicy.trustedWhenCalibrated` credits a calibrated estimate as ESTIMATED
   distance even for a long or curved gap.
+* `steps` / `ambiguousSteps` / `distanceEligibleSteps` are three different numbers:
+  reported, unusable, and used for distance.
 * **Journal.** `SessionRecorder` writes every input (header with the configuration,
   lifecycle, fixes with their arrival time, step readings, the tick that detected
   silence) to a CRC-per-line journal BEFORE applying it. The engine is a pure
   function of it, so replaying reproduces the live result exactly. The header also
   stores the engine version: a journal of other rules is replayed but flagged
   (`ENGINE_CHANGED`), and `reprocess` recomputes with the current rules without
-  writing. A restored session is paused at its LAST journaled event, so the time the
+  writing. A finished session restores as finished (with the same step finality), a running
+  one is paused at its LAST journaled event, so the time the
   process was dead is never workout time and a reboot cannot make a leg negative.
   See `doc/JOURNAL.md`.
 * Runs on a monotonic clock (Android `elapsedRealtime`, iOS `CLOCK_MONOTONIC`).
@@ -63,7 +67,8 @@ starting value.
   (needs `NSMotionUsageDescription`; a missing key, a denied permission, a runtime
   error and a query timeout are reported with stable codes, never as "0 steps").
   `finish` waits for the exact step count, identity-checked by (session, segment).
-* **Both:** one journal per session, ONE writer with a flush barrier, collision-safe
+* **Both:** one journal per session, ONE writer with a flush barrier and `fsync`
+  (`journalPending` counts what is not durable), collision-safe
   file names (a hash of the session id), atomic repair of a half-written last
   record (damage in the MIDDLE keeps the original as `<file>.corrupt` first); restore replays the journal with the configuration stored in its header
   and comes back paused; `listSessions`; clearing waits for the writer and is
@@ -90,6 +95,10 @@ starting value.
   contained errors, a `dispose` that cannot hang, and a hung call is NEVER
   overlapped by another (a Dart future cannot be cancelled, so later events wait
   until it ends).
+* `RestoreState` (`complete` / `tailRepaired` / `partial`) and `engineChanged` say what
+  a restore found; `partial` means everything after a damaged record was NOT applied.
+* `session.updateNotification(...)` (Android): a presenter changes the text of the
+  SDK's own notification through the SDK instead of posting with its id.
 * `RecordingState.finishing` (finalizing, not final) before `finished`;
   `journalPending` / `isDurable` say whether what is shown is on disk.
 
@@ -109,7 +118,7 @@ join a gap already credited, a watch producer is designed for but not built.
 
 ### Tests
 
-136 shared-core (incl. exact journal replay, reboot, engine version, reprocess, a
-ten-hour replay measured at ~0.2 s), 38 Android (29 engine, 9 file store, fakes for
-location, steps and journal), 30 iOS engine and 77 Dart tests pass; 11 CSV fixtures
-agree on both engines. No device test.
+144 shared-core (incl. exact journal replay, finished-session restore, reboot, engine
+version, reprocess, drift limits, step accounting; a ten-hour replay measured at ~0.2 s), 40
+Android (31 engine, 9 file store), 34 iOS engine and 78 Dart tests pass; 11 CSV fixtures
+agree on both engines. No device test: see `doc/DEVICE_TESTS.md`.

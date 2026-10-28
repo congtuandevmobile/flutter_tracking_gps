@@ -42,8 +42,10 @@ class BridgeSnapshot(
     /** Time of GPS gaps and unmeasured intervals that were NOT credited. */
     val uncreditedGapMs: Long,
     val uncreditedGaps: Int,
-    /** Steps in batches that straddle a GPS-quality change: used for nothing. */
+    /** Steps in batches that straddle a GPS-quality change: kept in the total, used for no estimate. */
     val ambiguousSteps: Long,
+    /** Steps that taught the stride or became a pending estimate. */
+    val distanceEligibleSteps: Long,
 )
 
 /** What to ask the OS for (see `AdaptiveSamplingPolicy`). */
@@ -265,6 +267,7 @@ class TrackingCoreBridge(
             uncreditedGapMs = s.uncreditedGapMs,
             uncreditedGaps = s.uncreditedGaps,
             ambiguousSteps = s.ambiguousSteps,
+            distanceEligibleSteps = s.distanceEligibleSteps,
         )
     }
 

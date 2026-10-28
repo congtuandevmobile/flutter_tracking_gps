@@ -34,3 +34,5 @@ Tested by `TrackingEngineTest` (fake location, step and journal sources).
 
 ## Updated
 `stop` goes through `FINISHING` (journal being flushed) and only then `STOPPED`; nothing published meanwhile passes for final. The snapshot carries `journalPending`. Restore keeps `<file>.corrupt` before repairing damage in the middle, and reports `ENGINE_CHANGED` when the journal's engine version differs. A session that is `FINISHING` cannot be cleared.
+
+A journal that ended at `Finish` restores as `STOPPED` (read-only, with the finality the journal says), never `PAUSED`. `stop` journals `Finalized(true)` (no exact-count query on Android). The snapshot carries the structured `restoreState` (`COMPLETE` / `TAIL_REPAIRED` / `PARTIAL`) and `engineChanged`, and `distanceEligibleSteps`.

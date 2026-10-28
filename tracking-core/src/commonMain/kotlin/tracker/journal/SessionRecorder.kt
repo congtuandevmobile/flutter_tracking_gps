@@ -31,6 +31,10 @@ class RestoreResult(
     val engineVersion: Int = 0,
     /** True when [engineVersion] differs from this code's: the replay may not equal what was shown live. */
     val engineChanged: Boolean = false,
+    /** The journal ended with `Finish`: the session is over and read-only (it is NOT paused). */
+    val finished: Boolean = false,
+    /** Only meaningful when [finished]: the step total was settled (see `JournalRecord.Finalized`). */
+    val stepsFinal: Boolean = false,
 )
 
 /**
@@ -53,6 +57,10 @@ class SessionRecorder private constructor(
 
     private var lastQuality = 0
 
+    /** True once the step total of a FINISHED session was settled (journaled by [markFinalized]). */
+    var stepsFinal: Boolean = false
+        private set
+
     // ── Lifecycle ───────────────────────────────────────────────────────────
 
     fun pause(atMs: Long) = record(JournalRecord.Pause(atMs)) { bridge.pause(atMs) }
@@ -60,6 +68,14 @@ class SessionRecorder private constructor(
     fun resume(atMs: Long, segmentId: Int) = record(JournalRecord.Resume(atMs, segmentId)) { bridge.resume(atMs, segmentId) }
 
     fun finish(atMs: Long) = record(JournalRecord.Finish(atMs)) { bridge.finish(atMs) }
+
+    /**
+     * Settles a finished session: [stepsFinal] says whether the step total is exact (the platform's
+     * exact count was obtained, or there is no step sensor) or only the live count. Journaled, so a
+     * restore of a finished session reports the same finality as the live result. Call once, after
+     * [finish] and after any [correctClosedSegment].
+     */
+    fun markFinalized(stepsFinal: Boolean) = record(JournalRecord.Finalized(stepsFinal)) { this.stepsFinal = stepsFinal }
 
     // ── Inputs ──────────────────────────────────────────────────────────────
 
@@ -141,6 +157,7 @@ class SessionRecorder private constructor(
             is JournalRecord.StepsCorrection -> bridge.correctClosedSegment(r.exactSteps)
             is JournalRecord.StepSensor -> bridge.setStepSensorActive(r.active)
             is JournalRecord.Pdr -> bridge.submitPdr(r.segmentId, r.atMs, r.meters)
+            is JournalRecord.Finalized -> stepsFinal = r.stepsFinal
         }
     }
 
@@ -206,6 +223,7 @@ class SessionRecorder private constructor(
             return RestoreResult(
                 recorder, contents.status, contents.damagedLine, header.sessionId, segment, nextSeq, fixes, lastWall,
                 header.extras, header.engineVersion, header.engineVersion != JournalCodec.ENGINE_VERSION,
+                finished = s.state == 3, stepsFinal = recorder.stepsFinal,
             )
         }
 
@@ -240,7 +258,7 @@ class SessionRecorder private constructor(
             is JournalRecord.StepCounter -> deliveredAtMs
             is JournalRecord.SegmentSteps -> deliveredAtMs
             is JournalRecord.Pdr -> atMs
-            is JournalRecord.StepsCorrection, is JournalRecord.StepSensor -> null
+            is JournalRecord.StepsCorrection, is JournalRecord.StepSensor, is JournalRecord.Finalized -> null
         }
 
         /** The raw fixes of a journal, oldest first (for drawing or exporting the route). */

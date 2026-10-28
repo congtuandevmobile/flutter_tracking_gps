@@ -64,6 +64,10 @@ final class TrackingEngine: LocationProviderDelegate {
     private var fixCount: Int64 = 0
     private var lastFixTimeMs: Int64?
     private var lastError: String?
+    private var restoreState: NativeRestoreState = .notRestored
+    private var engineChanged = false
+    /// Set by a restore of a FINISHED session: whether its step total was settled. nil for a live session.
+    private var restoredStepsFinal: Bool?
     private var minDistanceMeters: Double = 0
     private var adaptive = false
     private var extras: [String: String] = [:]
@@ -175,6 +179,9 @@ final class TrackingEngine: LocationProviderDelegate {
             self.fixCount = 0
             self.lastFixTimeMs = nil
             self.lastError = nil
+            self.restoreState = .notRestored
+            self.engineChanged = false
+            self.restoredStepsFinal = nil
             self.extras = newExtras
             self.minDistanceMeters = config.minDistanceMeters
             self.adaptive = config.adaptiveSampling
@@ -283,6 +290,10 @@ final class TrackingEngine: LocationProviderDelegate {
             let token = self.sessionToken
             let finalize: () -> Void = { [weak self] in
                 guard let self = self, token == self.sessionToken else { return }
+                // Settle the step total IN the journal before the flush: a restore of this session then
+                // reports the same finality as the live result.
+                let settled = self.lastCloseExact || !self.stepsEverActive
+                self.recorder?.markFinalized(stepsFinal: settled)
                 let recorder = self.recorder
                 self.storeQueue.async { [weak self] in
                     recorder?.flush()
@@ -396,7 +407,20 @@ final class TrackingEngine: LocationProviderDelegate {
                 default:
                     self.lastError = "\(TrackingErrorCode.journalCorrupt): damage at line \(contents.damagedLine); only the intact part was restored"
                 }
-                self.state = .paused
+                self.engineChanged = result.engineChanged
+                switch contents.status {
+                case .ok: self.restoreState = .complete
+                case .truncatedTail: self.restoreState = .tailRepaired
+                default: self.restoreState = .partial
+                }
+                // A journal that ended at Finish is a finished session: read-only, never "paused".
+                if result.finished {
+                    self.restoredStepsFinal = result.stepsFinal
+                    self.state = .stopped
+                } else {
+                    self.restoredStepsFinal = nil
+                    self.state = .paused
+                }
                 self.publish()
                 self.deliver(.success(self.makeSnapshot()), to: completion)
             }
@@ -636,9 +660,11 @@ final class TrackingEngine: LocationProviderDelegate {
         }
         stepCloseInFlight = true
         lastCloseExact = false
+        var settled = false  // touched only on `queue`: a SECOND answer (a late one after a timeout) is ignored
         steps.query(from: start, to: boundary, timeout: Self.exactStepsTimeout) { [weak self] result in
             self?.queue.async { [weak self] in
-                guard let self = self else { return }
+                guard let self = self, !settled else { return }
+                settled = true
                 if token == self.sessionToken, self.segmentId == closedSegment {
                     switch result {
                     case .success(let exact):
@@ -695,9 +721,10 @@ final class TrackingEngine: LocationProviderDelegate {
         if error == nil, let failure = sink?.failure {
             error = "\(TrackingErrorCode.storeWriteFailed): \(failure.localizedDescription)"
         }
-        let finalSteps = state == .stopped && (lastCloseExact || !stepsEverActive)
+        let finalSteps = state == .stopped && (restoredStepsFinal ?? (lastCloseExact || !stepsEverActive))
         return NativeSnapshot(
-            stepsStatus: stepsStatus, journalPending: Int64(sink?.pending ?? 0), stepsFinal: finalSteps,
+            stepsStatus: stepsStatus, restoreState: restoreState, engineChanged: engineChanged,
+            journalPending: Int64(sink?.pending ?? 0), stepsFinal: finalSteps,
             sessionId: sessionId, state: state, segmentId: segmentId, distance: makeDistance(),
             fixCount: fixCount, lastFixTimeMs: lastFixTimeMs,
             updatedAtMs: wallMs(wallNow()), error: error)
@@ -722,14 +749,14 @@ final class TrackingEngine: LocationProviderDelegate {
             speedMps: s.speedMps, lastAcceptedFixAtMs: lastFixEpoch, steps: s.steps,
             strideMeters: s.strideMeters, activeTimeMs: s.activeTimeMs, bridgedGapMs: s.bridgedGapMs,
             uncreditedGapMs: s.uncreditedGapMs, uncreditedGaps: Int64(s.uncreditedGaps),
-            ambiguousSteps: s.ambiguousSteps)
+            ambiguousSteps: s.ambiguousSteps, distanceEligibleSteps: s.distanceEligibleSteps)
     }
 
     static let emptyDistance = NativeDistance(
         quality: .unknown, totalMeters: 0, gpsMeters: 0, gapBridgeMeters: 0, pdrMeters: 0,
         pendingPdrMeters: 0, movingTimeMs: 0, isStopped: false, speedMps: -1, lastAcceptedFixAtMs: -1,
         steps: 0, strideMeters: -1, activeTimeMs: 0, bridgedGapMs: 0, uncreditedGapMs: 0, uncreditedGaps: 0,
-        ambiguousSteps: 0)
+        ambiguousSteps: 0, distanceEligibleSteps: 0)
 
     private func publish() {
         let snapshot = makeSnapshot()

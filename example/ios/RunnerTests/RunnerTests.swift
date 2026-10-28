@@ -640,4 +640,83 @@ final class RunnerTests: XCTestCase {
         XCTAssertEqual(restored.state, .paused)
         XCTAssertTrue(restored.error?.hasPrefix(TrackingErrorCode.engineChanged) == true, restored.error ?? "nil")
     }
+
+    func testAFinishedSessionRestoresAsStoppedNotPausedWithItsFinality() throws {
+        let steps = FakeSteps(clock: clock)
+        steps.autoAnswer = .success(33)
+        let store = MemoryStore()
+        let provider = FakeProvider(clock: clock)
+        let first = makeEngine(provider, store, steps: steps)
+        let _: NativeSnapshot = try run { first.start(config: config(steps: true), completion: $0) }
+        runFixes(provider, seconds: 5)
+        steps.push(30)
+        let live: NativeSnapshot = try run { first.stop(sessionId: "s", completion: $0) }
+        XCTAssertTrue(live.stepsFinal)
+        let second = makeEngine(FakeProvider(clock: clock), store)
+        let restored: NativeSnapshot = try run { second.restore(config: config(steps: true), completion: $0) }
+        XCTAssertEqual(restored.state, .stopped, "a finished session is read-only, never paused")
+        XCTAssertTrue(restored.stepsFinal)
+        XCTAssertEqual(restored.distance.steps, live.distance.steps)
+        XCTAssertEqual(restored.distance.totalMeters, live.distance.totalMeters)
+    }
+
+    func testAFinishWhoseExactQueryFailedRestoresWithProvisionalSteps() throws {
+        let steps = FakeSteps(clock: clock)
+        steps.autoAnswer = .failure(.timeout)
+        let store = MemoryStore()
+        let first = makeEngine(FakeProvider(clock: clock), store, steps: steps)
+        let _: NativeSnapshot = try run { first.start(config: config(steps: true), completion: $0) }
+        steps.push(30)
+        let live: NativeSnapshot = try run { first.stop(sessionId: "s", completion: $0) }
+        XCTAssertFalse(live.stepsFinal)
+        let second = makeEngine(FakeProvider(clock: clock), store)
+        let restored: NativeSnapshot = try run { second.restore(config: config(steps: true), completion: $0) }
+        XCTAssertEqual(restored.state, .stopped)
+        XCTAssertFalse(restored.stepsFinal, "the live count was never confirmed: it must not become exact by being restored")
+    }
+
+    func testALateSecondExactAnswerNeverChangesAFinalResult() throws {
+        let steps = FakeSteps(clock: clock)
+        steps.autoAnswer = nil
+        let engine = makeEngine(FakeProvider(clock: clock), steps: steps)
+        let _: NativeSnapshot = try run { engine.start(config: config(steps: true), completion: $0) }
+        steps.push(30)
+        let done = expectation(description: "stop answered")
+        var result: NativeSnapshot?
+        engine.stop(sessionId: "s") { r in
+            result = try? r.get()
+            done.fulfill()
+        }
+        drain(engine)
+        steps.release(.success(36), at: 0)  // the real answer
+        wait(for: [done], timeout: 5)
+        steps.release(.success(999), at: 0)  // a provider answering AGAIN, long after the result was published
+        drain(engine)
+        XCTAssertEqual(try XCTUnwrap(result).distance.steps, 36)
+        XCTAssertEqual(engine.snapshot().distance.steps, 36, "a published final result is never silently rewritten")
+    }
+
+    func testTheRestoreOutcomeIsAStructuredField() throws {
+        let store = MemoryStore()
+        let provider = FakeProvider(clock: clock)
+        let first = makeEngine(provider, store)
+        let _: NativeSnapshot = try run { first.start(config: config(), completion: $0) }
+        runFixes(provider, seconds: 6)
+        drain(first)
+        XCTAssertEqual(first.snapshot().restoreState, .notRestored)
+        let a = makeEngine(FakeProvider(clock: clock), store)
+        XCTAssertEqual(try run { (c: @escaping (Result<NativeSnapshot, Error>) -> Void) in a.restore(config: config(), completion: c) }.restoreState, .complete)
+        var lines = store.files["s"] ?? []
+        lines[lines.count - 1] = String(lines[lines.count - 1].dropLast(5))
+        store.files["s"] = lines
+        let b = makeEngine(FakeProvider(clock: clock), store)
+        XCTAssertEqual(try run { (c: @escaping (Result<NativeSnapshot, Error>) -> Void) in b.restore(config: config(), completion: c) }.restoreState, .tailRepaired)
+        var damaged = store.files["s"] ?? []
+        damaged[2] = String(damaged[2].prefix(10)) + "#" + String(damaged[2].dropFirst(11))
+        store.files["s"] = damaged
+        let c = makeEngine(FakeProvider(clock: clock), store)
+        let partial: NativeSnapshot = try run { c.restore(config: config(), completion: $0) }
+        XCTAssertEqual(partial.restoreState, .partial)
+        XCTAssertLessThan(partial.fixCount, 6, "everything after the damage was NOT applied")
+    }
 }

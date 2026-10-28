@@ -100,3 +100,5 @@ example/            a small recorder screen
 `finish()` returns a FINAL snapshot (`RecordingState.finished`); while it is being
 finalized the state is `finishing`. `snapshot.isDurable` says whether everything shown
 has reached the disk.
+
+What is proven by unit tests and what still needs a real device: see `doc/DEVICE_TESTS.md`.

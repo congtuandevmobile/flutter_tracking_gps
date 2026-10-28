@@ -213,6 +213,20 @@ enum NativeStepsStatus: Int {
   case failed = 4
 }
 
+/// What a restore found in the session's journal.
+enum NativeRestoreState: Int {
+  /// The snapshot was not produced by a restore.
+  case notRestored = 0
+  /// Every record was intact.
+  case complete = 1
+  /// Only the last record was incomplete (a kill mid-write) and was dropped.
+  case tailRepaired = 2
+  /// A record before the last was damaged: ONLY the part before it was restored;
+  /// everything after it was NOT applied (the original file is kept as
+  /// `<file>.corrupt`). The result is partial and says so.
+  case partial = 3
+}
+
 enum NativeGpsQuality: Int {
   case unknown = 0
   case good = 1
@@ -602,8 +616,13 @@ struct NativeDistance: Hashable {
   /// never hidden.
   var uncreditedGapMs: Int64
   var uncreditedGaps: Int64
-  /// Steps measured in a batch that straddles a GPS-quality change: used for nothing.
+  /// Steps measured in a batch that straddles a GPS-quality change: kept in the
+  /// total and in the journal, used for no estimate.
   var ambiguousSteps: Int64
+  /// Steps that taught the stride or became a pending estimate. `steps` is what
+  /// the platform reported for the active segments; this is the part that was
+  /// ELIGIBLE to be used for distance.
+  var distanceEligibleSteps: Int64
 
 
   // swift-format-ignore: AlwaysUseLowerCamelCase
@@ -625,6 +644,7 @@ struct NativeDistance: Hashable {
     let uncreditedGapMs = pigeonVar_list[14] as! Int64
     let uncreditedGaps = pigeonVar_list[15] as! Int64
     let ambiguousSteps = pigeonVar_list[16] as! Int64
+    let distanceEligibleSteps = pigeonVar_list[17] as! Int64
 
     return NativeDistance(
       quality: quality,
@@ -643,7 +663,8 @@ struct NativeDistance: Hashable {
       bridgedGapMs: bridgedGapMs,
       uncreditedGapMs: uncreditedGapMs,
       uncreditedGaps: uncreditedGaps,
-      ambiguousSteps: ambiguousSteps
+      ambiguousSteps: ambiguousSteps,
+      distanceEligibleSteps: distanceEligibleSteps
     )
   }
   func toList() -> [Any?] {
@@ -665,13 +686,14 @@ struct NativeDistance: Hashable {
       uncreditedGapMs,
       uncreditedGaps,
       ambiguousSteps,
+      distanceEligibleSteps,
     ]
   }
   static func == (lhs: NativeDistance, rhs: NativeDistance) -> Bool {
     if Swift.type(of: lhs) != Swift.type(of: rhs) {
       return false
     }
-    return deepEqualsTrackingApi(lhs.quality, rhs.quality) && deepEqualsTrackingApi(lhs.totalMeters, rhs.totalMeters) && deepEqualsTrackingApi(lhs.gpsMeters, rhs.gpsMeters) && deepEqualsTrackingApi(lhs.gapBridgeMeters, rhs.gapBridgeMeters) && deepEqualsTrackingApi(lhs.pdrMeters, rhs.pdrMeters) && deepEqualsTrackingApi(lhs.pendingPdrMeters, rhs.pendingPdrMeters) && deepEqualsTrackingApi(lhs.movingTimeMs, rhs.movingTimeMs) && deepEqualsTrackingApi(lhs.isStopped, rhs.isStopped) && deepEqualsTrackingApi(lhs.speedMps, rhs.speedMps) && deepEqualsTrackingApi(lhs.lastAcceptedFixAtMs, rhs.lastAcceptedFixAtMs) && deepEqualsTrackingApi(lhs.steps, rhs.steps) && deepEqualsTrackingApi(lhs.strideMeters, rhs.strideMeters) && deepEqualsTrackingApi(lhs.activeTimeMs, rhs.activeTimeMs) && deepEqualsTrackingApi(lhs.bridgedGapMs, rhs.bridgedGapMs) && deepEqualsTrackingApi(lhs.uncreditedGapMs, rhs.uncreditedGapMs) && deepEqualsTrackingApi(lhs.uncreditedGaps, rhs.uncreditedGaps) && deepEqualsTrackingApi(lhs.ambiguousSteps, rhs.ambiguousSteps)
+    return deepEqualsTrackingApi(lhs.quality, rhs.quality) && deepEqualsTrackingApi(lhs.totalMeters, rhs.totalMeters) && deepEqualsTrackingApi(lhs.gpsMeters, rhs.gpsMeters) && deepEqualsTrackingApi(lhs.gapBridgeMeters, rhs.gapBridgeMeters) && deepEqualsTrackingApi(lhs.pdrMeters, rhs.pdrMeters) && deepEqualsTrackingApi(lhs.pendingPdrMeters, rhs.pendingPdrMeters) && deepEqualsTrackingApi(lhs.movingTimeMs, rhs.movingTimeMs) && deepEqualsTrackingApi(lhs.isStopped, rhs.isStopped) && deepEqualsTrackingApi(lhs.speedMps, rhs.speedMps) && deepEqualsTrackingApi(lhs.lastAcceptedFixAtMs, rhs.lastAcceptedFixAtMs) && deepEqualsTrackingApi(lhs.steps, rhs.steps) && deepEqualsTrackingApi(lhs.strideMeters, rhs.strideMeters) && deepEqualsTrackingApi(lhs.activeTimeMs, rhs.activeTimeMs) && deepEqualsTrackingApi(lhs.bridgedGapMs, rhs.bridgedGapMs) && deepEqualsTrackingApi(lhs.uncreditedGapMs, rhs.uncreditedGapMs) && deepEqualsTrackingApi(lhs.uncreditedGaps, rhs.uncreditedGaps) && deepEqualsTrackingApi(lhs.ambiguousSteps, rhs.ambiguousSteps) && deepEqualsTrackingApi(lhs.distanceEligibleSteps, rhs.distanceEligibleSteps)
   }
 
   func hash(into hasher: inout Hasher) {
@@ -693,6 +715,7 @@ struct NativeDistance: Hashable {
     deepHashTrackingApi(value: uncreditedGapMs, hasher: &hasher)
     deepHashTrackingApi(value: uncreditedGaps, hasher: &hasher)
     deepHashTrackingApi(value: ambiguousSteps, hasher: &hasher)
+    deepHashTrackingApi(value: distanceEligibleSteps, hasher: &hasher)
   }
 }
 
@@ -700,6 +723,11 @@ struct NativeDistance: Hashable {
 struct NativeSnapshot: Hashable {
   /// State of the native step sensor.
   var stepsStatus: NativeStepsStatus
+  /// What the last restore found; [NativeRestoreState.notRestored] otherwise.
+  var restoreState: NativeRestoreState
+  /// The journal was recorded with other engine rules than this code's: the
+  /// restored numbers may differ from what was shown live.
+  var engineChanged: Bool
   /// Events accepted by the engine that are NOT on disk yet (queued for the
   /// journal writer). Zero means everything shown here is durable; a crash while
   /// this is above zero can lose that many of the latest events.
@@ -723,19 +751,23 @@ struct NativeSnapshot: Hashable {
   // swift-format-ignore: AlwaysUseLowerCamelCase
   static func fromList(_ pigeonVar_list: [Any?]) -> NativeSnapshot? {
     let stepsStatus = pigeonVar_list[0] as! NativeStepsStatus
-    let journalPending = pigeonVar_list[1] as! Int64
-    let stepsFinal = pigeonVar_list[2] as! Bool
-    let sessionId: String? = nilOrValue(pigeonVar_list[3])
-    let state = pigeonVar_list[4] as! NativeTrackingState
-    let segmentId = pigeonVar_list[5] as! Int64
-    let distance = pigeonVar_list[6] as! NativeDistance
-    let fixCount = pigeonVar_list[7] as! Int64
-    let lastFixTimeMs: Int64? = nilOrValue(pigeonVar_list[8])
-    let updatedAtMs = pigeonVar_list[9] as! Int64
-    let error: String? = nilOrValue(pigeonVar_list[10])
+    let restoreState = pigeonVar_list[1] as! NativeRestoreState
+    let engineChanged = pigeonVar_list[2] as! Bool
+    let journalPending = pigeonVar_list[3] as! Int64
+    let stepsFinal = pigeonVar_list[4] as! Bool
+    let sessionId: String? = nilOrValue(pigeonVar_list[5])
+    let state = pigeonVar_list[6] as! NativeTrackingState
+    let segmentId = pigeonVar_list[7] as! Int64
+    let distance = pigeonVar_list[8] as! NativeDistance
+    let fixCount = pigeonVar_list[9] as! Int64
+    let lastFixTimeMs: Int64? = nilOrValue(pigeonVar_list[10])
+    let updatedAtMs = pigeonVar_list[11] as! Int64
+    let error: String? = nilOrValue(pigeonVar_list[12])
 
     return NativeSnapshot(
       stepsStatus: stepsStatus,
+      restoreState: restoreState,
+      engineChanged: engineChanged,
       journalPending: journalPending,
       stepsFinal: stepsFinal,
       sessionId: sessionId,
@@ -751,6 +783,8 @@ struct NativeSnapshot: Hashable {
   func toList() -> [Any?] {
     return [
       stepsStatus,
+      restoreState,
+      engineChanged,
       journalPending,
       stepsFinal,
       sessionId,
@@ -767,12 +801,14 @@ struct NativeSnapshot: Hashable {
     if Swift.type(of: lhs) != Swift.type(of: rhs) {
       return false
     }
-    return deepEqualsTrackingApi(lhs.stepsStatus, rhs.stepsStatus) && deepEqualsTrackingApi(lhs.journalPending, rhs.journalPending) && deepEqualsTrackingApi(lhs.stepsFinal, rhs.stepsFinal) && deepEqualsTrackingApi(lhs.sessionId, rhs.sessionId) && deepEqualsTrackingApi(lhs.state, rhs.state) && deepEqualsTrackingApi(lhs.segmentId, rhs.segmentId) && deepEqualsTrackingApi(lhs.distance, rhs.distance) && deepEqualsTrackingApi(lhs.fixCount, rhs.fixCount) && deepEqualsTrackingApi(lhs.lastFixTimeMs, rhs.lastFixTimeMs) && deepEqualsTrackingApi(lhs.updatedAtMs, rhs.updatedAtMs) && deepEqualsTrackingApi(lhs.error, rhs.error)
+    return deepEqualsTrackingApi(lhs.stepsStatus, rhs.stepsStatus) && deepEqualsTrackingApi(lhs.restoreState, rhs.restoreState) && deepEqualsTrackingApi(lhs.engineChanged, rhs.engineChanged) && deepEqualsTrackingApi(lhs.journalPending, rhs.journalPending) && deepEqualsTrackingApi(lhs.stepsFinal, rhs.stepsFinal) && deepEqualsTrackingApi(lhs.sessionId, rhs.sessionId) && deepEqualsTrackingApi(lhs.state, rhs.state) && deepEqualsTrackingApi(lhs.segmentId, rhs.segmentId) && deepEqualsTrackingApi(lhs.distance, rhs.distance) && deepEqualsTrackingApi(lhs.fixCount, rhs.fixCount) && deepEqualsTrackingApi(lhs.lastFixTimeMs, rhs.lastFixTimeMs) && deepEqualsTrackingApi(lhs.updatedAtMs, rhs.updatedAtMs) && deepEqualsTrackingApi(lhs.error, rhs.error)
   }
 
   func hash(into hasher: inout Hasher) {
     hasher.combine("NativeSnapshot")
     deepHashTrackingApi(value: stepsStatus, hasher: &hasher)
+    deepHashTrackingApi(value: restoreState, hasher: &hasher)
+    deepHashTrackingApi(value: engineChanged, hasher: &hasher)
     deepHashTrackingApi(value: journalPending, hasher: &hasher)
     deepHashTrackingApi(value: stepsFinal, hasher: &hasher)
     deepHashTrackingApi(value: sessionId, hasher: &hasher)
@@ -810,18 +846,24 @@ private class TrackingApiPigeonCodecReader: FlutterStandardReader {
     case 132:
       let enumResultAsInt: Int? = nilOrValue(self.readValue() as! Int?)
       if let enumResultAsInt = enumResultAsInt {
-        return NativeGpsQuality(rawValue: enumResultAsInt)
+        return NativeRestoreState(rawValue: enumResultAsInt)
       }
       return nil
     case 133:
-      return NativeFix.fromList(self.readValue() as! [Any?])
+      let enumResultAsInt: Int? = nilOrValue(self.readValue() as! Int?)
+      if let enumResultAsInt = enumResultAsInt {
+        return NativeGpsQuality(rawValue: enumResultAsInt)
+      }
+      return nil
     case 134:
-      return EngineConfig.fromList(self.readValue() as! [Any?])
+      return NativeFix.fromList(self.readValue() as! [Any?])
     case 135:
-      return StartConfig.fromList(self.readValue() as! [Any?])
+      return EngineConfig.fromList(self.readValue() as! [Any?])
     case 136:
-      return NativeDistance.fromList(self.readValue() as! [Any?])
+      return StartConfig.fromList(self.readValue() as! [Any?])
     case 137:
+      return NativeDistance.fromList(self.readValue() as! [Any?])
+    case 138:
       return NativeSnapshot.fromList(self.readValue() as! [Any?])
     default:
       return super.readValue(ofType: type)
@@ -840,23 +882,26 @@ private class TrackingApiPigeonCodecWriter: FlutterStandardWriter {
     } else if let value = value as? NativeStepsStatus {
       super.writeByte(131)
       super.writeValue(value.rawValue)
-    } else if let value = value as? NativeGpsQuality {
+    } else if let value = value as? NativeRestoreState {
       super.writeByte(132)
       super.writeValue(value.rawValue)
-    } else if let value = value as? NativeFix {
+    } else if let value = value as? NativeGpsQuality {
       super.writeByte(133)
-      super.writeValue(value.toList())
-    } else if let value = value as? EngineConfig {
+      super.writeValue(value.rawValue)
+    } else if let value = value as? NativeFix {
       super.writeByte(134)
       super.writeValue(value.toList())
-    } else if let value = value as? StartConfig {
+    } else if let value = value as? EngineConfig {
       super.writeByte(135)
       super.writeValue(value.toList())
-    } else if let value = value as? NativeDistance {
+    } else if let value = value as? StartConfig {
       super.writeByte(136)
       super.writeValue(value.toList())
-    } else if let value = value as? NativeSnapshot {
+    } else if let value = value as? NativeDistance {
       super.writeByte(137)
+      super.writeValue(value.toList())
+    } else if let value = value as? NativeSnapshot {
+      super.writeByte(138)
       super.writeValue(value.toList())
     } else {
       super.writeValue(value)
@@ -923,6 +968,11 @@ protocol TrackingHostApi {
   /// Deletes the persisted journal of [sessionId] (it holds coordinates). Waits for
   /// the writer first, so nothing re-creates the file afterwards.
   func clearSession(sessionId: String, completion: @escaping (Result<Void, Error>) -> Void)
+  /// Android only: replaces the text of the SDK's foreground notification while a
+  /// session records. The SDK keeps the channel, the tap action and the lifecycle;
+  /// a presenter that wants a richer notification calls this instead of posting its
+  /// own with the SDK's id. A no-op on iOS and when no session records.
+  func updateNotification(title: String, text: String) throws
   /// The ids of the sessions persisted on this device (for recovery after a kill).
   func listSessions(completion: @escaping (Result<[String], Error>) -> Void)
 }
@@ -1177,6 +1227,26 @@ class TrackingHostApiSetup {
       }
     } else {
       clearSessionChannel.setMessageHandler(nil)
+    }
+    /// Android only: replaces the text of the SDK's foreground notification while a
+    /// session records. The SDK keeps the channel, the tap action and the lifecycle;
+    /// a presenter that wants a richer notification calls this instead of posting its
+    /// own with the SDK's id. A no-op on iOS and when no session records.
+    let updateNotificationChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.flutter_tracking_gps.TrackingHostApi.updateNotification\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      updateNotificationChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let titleArg = args[0] as! String
+        let textArg = args[1] as! String
+        do {
+          try api.updateNotification(title: titleArg, text: textArg)
+          reply(wrapResult(nil))
+        } catch {
+          reply(wrapError(error))
+        }
+      }
+    } else {
+      updateNotificationChannel.setMessageHandler(nil)
     }
     /// The ids of the sessions persisted on this device (for recovery after a kill).
     let listSessionsChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.flutter_tracking_gps.TrackingHostApi.listSessions\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)

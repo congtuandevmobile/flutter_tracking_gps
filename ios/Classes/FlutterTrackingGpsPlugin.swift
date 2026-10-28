@@ -86,6 +86,10 @@ public class FlutterTrackingGpsPlugin: NSObject, FlutterPlugin, TrackingHostApi 
         FlutterTrackingGpsPlugin.engine.restore(config: config, completion: completion)
     }
 
+    func updateNotification(title: String, text: String) throws {
+        // Android only: iOS has no foreground notification to update.
+    }
+
     func listSessions(completion: @escaping (Result<[String], Error>) -> Void) {
         FlutterTrackingGpsPlugin.engine.listSessions(completion: completion)
     }

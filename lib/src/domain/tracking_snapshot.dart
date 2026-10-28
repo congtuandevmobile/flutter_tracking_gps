@@ -24,6 +24,9 @@ class TrackingSnapshot {
     this.error,
     this.stepsFinal = false,
     this.journalPending = 0,
+    this.restoreState = RestoreState.notRestored,
+    this.engineChanged = false,
+    this.distanceEligibleSteps = 0,
     this.activeTime = Duration.zero,
     this.bridgedGap = Duration.zero,
     this.uncreditedGap = Duration.zero,
@@ -53,6 +56,9 @@ class TrackingSnapshot {
       error = null,
       stepsFinal = false,
       journalPending = 0,
+      restoreState = RestoreState.notRestored,
+      engineChanged = false,
+      distanceEligibleSteps = 0,
       activeTime = Duration.zero,
       bridgedGap = Duration.zero,
       uncreditedGap = Duration.zero,
@@ -113,15 +119,29 @@ class TrackingSnapshot {
   /// Everything this snapshot shows has reached the disk.
   bool get isDurable => journalPending == 0;
 
+  /// What the last restore found. [RestoreState.partial] means ONLY the part
+  /// before a damaged record was restored: the numbers here are incomplete.
+  final RestoreState restoreState;
+
+  /// The journal was recorded with other engine rules than this code's: the
+  /// restored numbers may differ from what was shown live.
+  final bool engineChanged;
+
+  /// Steps that taught the stride or became a pending estimate. [steps] is what
+  /// the platform reported for the active segments; this is the part that was
+  /// ELIGIBLE to be used for distance (the rest is kept but used for nothing).
+  final int distanceEligibleSteps;
+
   /// Workout time: the running legs only, pauses excluded. The headline timer.
   final Duration activeTime;
 
   /// Time of GPS gaps that were credited (a bridge or an estimate).
   final Duration bridgedGap;
 
-  /// Time of GPS gaps and unmeasured intervals (a weak start, a gap still open
-  /// at the end) that were NOT credited. Reported, never hidden: the distance
-  /// for this time is unknown, not zero.
+  /// TIME (not a distance) of GPS gaps and unmeasured intervals (a weak start, a
+  /// gap still open at the end) that were NOT credited. It is part of
+  /// [activeTime]. The SDK does not know how far the person went in it: the
+  /// distance is unknown, not zero and not "lost".
   final Duration uncreditedGap;
   final int uncreditedGaps;
 

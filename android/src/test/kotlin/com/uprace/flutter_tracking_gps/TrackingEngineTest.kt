@@ -537,4 +537,48 @@ class TrackingEngineTest {
         assertEquals(NativeTrackingState.PAUSED, restored.state)
         assertTrue(restored.error?.startsWith(TrackingErrorCode.ENGINE_CHANGED) == true, restored.error)
     }
+
+    @Test
+    fun aFinishedSessionRestoresAsStoppedNotPausedWithItsFinality() = runTest {
+        val store = MemoryJournalStore()
+        val source = FakeSource()
+        val first = engine(source, store)
+        first.start(startConfig())
+        source.run(5)
+        val live = first.stop("s")
+        val restored = engine(FakeSource(), store).restore(startConfig())
+        assertEquals(NativeTrackingState.STOPPED, restored.state, "a finished session is read-only, never paused")
+        assertTrue(restored.stepsFinal)
+        assertEquals(live.distance.totalMeters, restored.distance.totalMeters)
+        assertEquals(live.distance.activeTimeMs, restored.distance.activeTimeMs)
+        // And resume is refused: nothing can reopen a finished session.
+        val again = engine(FakeSource(), store)
+        again.restore(startConfig())
+        assertEquals(NativeTrackingState.STOPPED, again.resume("s").state)
+    }
+
+    @Test
+    fun theRestoreOutcomeIsAStructuredFieldNotJustAString() = runTest {
+        val store = MemoryJournalStore()
+        val source = FakeSource()
+        val first = engine(source, store)
+        first.start(startConfig())
+        source.run(6)
+        assertEquals(NativeRestoreState.NOT_RESTORED, first.snapshot().restoreState)
+        assertEquals(NativeRestoreState.COMPLETE, engine(FakeSource(), store).restore(startConfig()).restoreState)
+
+        val lines = store.files.getValue("s")
+        lines[lines.lastIndex] = lines.last().dropLast(5)
+        val tail = engine(FakeSource(), store).restore(startConfig())
+        assertEquals(NativeRestoreState.TAIL_REPAIRED, tail.restoreState)
+
+        store.files.getValue("s")[2] = store.files.getValue("s")[2].replaceRange(10, 11, "#")
+        val partial = engine(FakeSource(), store).restore(startConfig())
+        assertEquals(NativeRestoreState.PARTIAL, partial.restoreState)
+        assertTrue(partial.fixCount < 6, "everything after the damage was NOT applied")
+
+        val header = JournalCodec.decode(store.files.getValue("s")[0]) as JournalRecord.Header
+        store.files.getValue("s")[0] = JournalCodec.encode(header.copy(engineVersion = JournalCodec.ENGINE_VERSION + 1))
+        assertTrue(engine(FakeSource(), store).restore(startConfig()).engineChanged)
+    }
 }

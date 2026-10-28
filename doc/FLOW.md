@@ -138,14 +138,20 @@ screen does not move; it jumps when GPS returns.
 ## Standing still, and gaps that are too long
 
 - **Doppler below 0.4 m/s** (when its own accuracy is decent) = no distance.
-- **No usable Doppler:** the speed is taken from the displacement itself; below
-  the stationary limit = no distance.
+- **No usable Doppler:** the speed is taken from the displacement itself; below the
+  stationary limit = no distance. It only ever BLOCKS (a slow drift is stopped); it never
+  confirms movement, which still has to clear the noise radius. **Limit, pinned by a test:**
+  without a Doppler speed, a drift faster than the stationary limit (say 0.6 m/s) cannot be
+  told from slow walking and IS credited.
 - **Stopped (stayed within the stay radius for 30 s) and a fix still inside it:**
   jitter, no distance. The anchor stays put, so when the person leaves the radius
   the whole displacement is credited at once: nothing is lost.
-- **A gap with a working step sensor and no steps at all** (and a gap of at least
-  30 s, since Android may deliver steps ~10 s late) is credited 0 m: the person
-  stood still. Cycling (no steps) is never judged this way.
+- **A gap with a working step sensor that delivered NO step event** (and a gap of at
+  least 30 s, since Android may deliver steps ~10 s late) is not credited: nothing shows
+  the person moved. This is absence of evidence, NOT proof of standing still (a sensor can
+  be late or not cover the whole gap), so the gap is reported as UNCREDITED (unknown),
+  never as "measured zero". Only a delta of 0 CONFIRMED for the interval would justify more,
+  and no platform call here gives that. Cycling (no steps) is never judged this way.
 - **A gap beyond `maxBridge`, or a loop:** the conservative policies credit what
   GPS can corroborate (possibly 0 m) and REPORT the time as uncredited.
 - **`PdrPolicy.trustedWhenCalibrated` (opt-in):** once the stride was calibrated on
@@ -155,6 +161,13 @@ screen does not move; it jumps when GPS returns.
   shaken in the hand) can then be credited. The default never does that.
 
 ## Steps (native sensor, shared core)
+
+Three numbers, not one: `steps` = what the platform reported for the active segments;
+`ambiguousSteps` = the part whose GPS-quality interval could not be told (kept, used for
+nothing); `distanceEligibleSteps` = the part that taught the stride or became a pending
+estimate. `uncreditedGap` is a TIME, not a distance: the SDK does not know how far the
+person went in it.
+
 
 Opt in with `createSession(stepsEnabled: true)`. Native reads the sensor (Android
 `TYPE_STEP_COUNTER`, iOS `CMPedometer`); the shared core decides everything else:
@@ -232,8 +245,18 @@ sensor ─► StepSession (baseline / segments / counter reset)  ─► steps de
   location, tick and steps start; if the OS refuses (for example a start from the
   background) the session stays paused and `resume` throws
   `FOREGROUND_START_FAILED`.
-- **Durable or not is public.** `journalPending` counts events accepted but not yet on
-  disk (`isDurable` is true at zero); a crash while it is above zero can lose that many.
+- **Durable or not is public.** `journalPending` counts events accepted but not yet
+  DURABLE: queued, or written to the OS but not yet `fsync`ed (at most about a second
+  behind). `isDurable` is true at zero. A process crash alone loses only what is still
+  queued (the OS keeps what was written); a power loss can also lose the unsynced part.
+- **A finished session restores as finished.** The journal ends with `Finish` and a
+  `Finalized` record saying whether the step total was settled (exact count obtained, or
+  no step sensor) or provisional; a restore returns the session read-only (never paused)
+  with the same finality. A journal cut between the two has provisional steps. A late second
+  answer to the exact-count query never rewrites a published final result.
+- **The restore outcome is a field,** not a string: `restoreState` is `complete`,
+  `tailRepaired` or `partial` (only the part before a damaged record was restored; the
+  rest was NOT applied and the original is kept), plus `engineChanged`.
 - **Finish is a state, not an instant.** `finishing` (live data closed, exact steps
   requested, journal flushed) then `finished`. Only `finished` is final; a snapshot
   published while `finishing` says `stepsFinal == false`.

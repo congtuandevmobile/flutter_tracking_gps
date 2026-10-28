@@ -13,6 +13,23 @@ enum RecordingState {
 /// Native health is independent from the last commanded recording state.
 enum TrackingFailureState { none, permissionDenied, error }
 
+/// What a restore found in the session's journal.
+enum RestoreState {
+  /// The snapshot was not produced by a restore.
+  notRestored,
+
+  /// Every record was intact.
+  complete,
+
+  /// Only the last record was incomplete (a kill mid-write) and was dropped.
+  tailRepaired,
+
+  /// A record before the last was damaged: ONLY the part before it was restored,
+  /// everything after it was NOT applied (the original file is kept next to it as
+  /// `<file>.corrupt`). The result is partial and says so.
+  partial,
+}
+
 /// State of the native step sensor.
 enum StepsStatus {
   /// Not requested (`stepsEnabled` is false) or not started yet.

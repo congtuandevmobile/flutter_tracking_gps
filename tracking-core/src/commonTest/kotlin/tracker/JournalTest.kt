@@ -83,6 +83,7 @@ class JournalCodecTest {
             JournalRecord.Fix("s|1", 2, 3, 4, 5, -10.123456789, 106.0, 5.5, -1.0, 1e-7, 359.9, -4.5, 3.0, "gp=s", true, 9),
             JournalRecord.Tick(7), JournalRecord.StepCounter(1, 2, 3, 4), JournalRecord.SegmentSteps(1, 2, 3, 4),
             JournalRecord.StepsCorrection(8), JournalRecord.StepSensor(true), JournalRecord.Pdr(1, 2, 3.5),
+            JournalRecord.Finalized(true), JournalRecord.Finalized(false),
         )
         for (r in records) assertEquals(r, JournalCodec.decode(JournalCodec.encode(r)), r.toString())
     }
@@ -269,5 +270,37 @@ class JournalReplayTest {
         assertTrue(s.movingTimeMs <= s.activeTimeMs, "moving ${s.movingTimeMs} > active ${s.activeTimeMs}")
         assertTrue(s.uncreditedGapMs <= s.activeTimeMs)
         assertTrue(s.bridgedGapMs + s.uncreditedGapMs <= s.activeTimeMs, "gaps are inside the active time, not added to it")
+    }
+
+    @Test fun aFinishedSessionRestoresAsFinishedNotPausedWithItsFinality() {
+        for (final in listOf(true, false)) {
+            val (r, sink) = live()
+            scenario(r)
+            r.finish(ms(130.0))
+            r.correctClosedSegment(r.snapshot().steps + 3)
+            r.markFinalized(final)
+            val result = SessionRecorder.restore(MemSink(), sink.lines)
+            assertTrue(result.finished, "the session is over")
+            assertEquals(final, result.stepsFinal)
+            same(r.snapshot(), assertNotNull(result.recorder).snapshot()) // including the exact correction and state FINISHED
+            assertEquals(3, assertNotNull(result.recorder).snapshot().state)
+        }
+    }
+
+    @Test fun aJournalCutBetweenFinishAndFinalizedHasProvisionalSteps() {
+        val (r, sink) = live()
+        scenario(r)
+        r.finish(ms(130.0)) // the process died before the step total was settled
+        val result = SessionRecorder.restore(MemSink(), sink.lines)
+        assertTrue(result.finished)
+        assertEquals(false, result.stepsFinal)
+    }
+
+    @Test fun aRunningSessionIsNotFinished() {
+        val (r, sink) = live()
+        scenario(r)
+        val result = SessionRecorder.restore(MemSink(), sink.lines)
+        assertEquals(false, result.finished)
+        assertEquals(false, result.stepsFinal)
     }
 }

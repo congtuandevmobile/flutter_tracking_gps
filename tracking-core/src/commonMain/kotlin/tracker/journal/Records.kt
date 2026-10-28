@@ -88,4 +88,12 @@ sealed class JournalRecord {
     data class StepsCorrection(val exactSteps: Long) : JournalRecord()
     data class StepSensor(val active: Boolean) : JournalRecord()
     data class Pdr(val segmentId: Int, val atMs: Long, val meters: Double) : JournalRecord()
+
+    /**
+     * Written once, after `Finish`, when the step total was settled: [stepsFinal] is true when the
+     * platform's exact count was obtained (or there is no step sensor), false when the total is
+     * only the live count. A journal that ends at `Finish` without it was cut before settling:
+     * its steps are provisional.
+     */
+    data class Finalized(val stepsFinal: Boolean) : JournalRecord()
 }

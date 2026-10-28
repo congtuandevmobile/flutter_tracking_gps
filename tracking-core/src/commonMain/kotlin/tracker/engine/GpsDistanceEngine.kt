@@ -92,6 +92,7 @@ class GpsDistanceEngine(
     private var uncreditedGapMs = 0L
     private var uncreditedGaps = 0
     private var ambiguousSteps = 0L
+    private var eligibleSteps = 0L
     private var stepSensorActive = false
     private var stepsInGap = 0L
 
@@ -130,6 +131,7 @@ class GpsDistanceEngine(
             uncreditedGapMs = uncreditedGapMs,
             uncreditedGaps = uncreditedGaps,
             ambiguousSteps = ambiguousSteps,
+            distanceEligibleSteps = eligibleSteps,
         )
 
     /** Workout time: running legs only, up to the latest time the engine saw. */
@@ -166,6 +168,7 @@ class GpsDistanceEngine(
         uncreditedGapMs = 0
         uncreditedGaps = 0
         ambiguousSteps = 0
+        eligibleSteps = 0
         stepSensorActive = false
         stepsInGap = 0
         resetMarks(atMs)
@@ -289,13 +292,16 @@ class GpsDistanceEngine(
             else -> 0
         }
         when (wholly) {
-            1 -> stride.addSteps(steps)
+            1 -> {
+                stride.addSteps(steps)
+                eligibleSteps += steps // taught the stride
+            }
             -1 -> {
                 stride.breakWindow()
                 if (quality != GpsQuality.GOOD && quality != GpsQuality.RECOVERING) stepsInGap += steps
                 if (config.pdrPolicy == PdrPolicy.OFF) return
                 val perStep = stride.strideMeters ?: return
-                addPending(deliveredAtMs, steps * perStep)
+                if (addPending(deliveredAtMs, steps * perStep)) eligibleSteps += steps // became a pending estimate
             }
             else -> {
                 ambiguousSteps += steps
@@ -308,11 +314,13 @@ class GpsDistanceEngine(
     /** A batch measured and delivered at [atMs] (an instant). */
     fun onSteps(segmentId: Int, atMs: Long, steps: Long) = onSteps(segmentId, atMs, atMs, atMs, steps)
 
-    private fun addPending(atMs: Long, meters: Double) {
+    /** True when the estimate was attached (GPS is not measuring now). */
+    private fun addPending(atMs: Long, meters: Double): Boolean {
         // While GPS is measuring, GPS already has this stretch.
-        if (quality == GpsQuality.GOOD || quality == GpsQuality.RECOVERING) return
+        if (quality == GpsQuality.GOOD || quality == GpsQuality.RECOVERING) return false
         pendingPdr += meters
         log.note(atMs, "pdr pending +${meters.f1()} m (pending ${pendingPdr.f1()} m)")
+        return true
     }
 
     // ── GPS-quality timeline (bounded) ──────────────────────────────────────
@@ -563,13 +571,14 @@ class GpsDistanceEngine(
         stride.breakWindow()
         val evidence = stepsInGap
         stepsInGap = 0
-        // A long gap with a working step sensor that measured no steps at all means
-        // the person stood still: nothing to credit (shorter gaps are not judged,
-        // the sensor may deliver late).
+        // A long gap with a working step sensor that delivered NO step event: nothing shows the
+        // person moved, so nothing is credited. This is absence of evidence, NOT proof of standing
+        // still (a sensor can be late or not cover the whole gap), so the gap is reported as
+        // UNCREDITED (unknown), never as "measured zero". Shorter gaps are not judged.
         val noSteps = config.recoveryStepEvidenceAfterMs > 0 && stepSensorActive &&
             config.pdrPolicy != PdrPolicy.OFF && gapMs >= config.recoveryStepEvidenceAfterMs && evidence == 0L
         val result = if (noSteps) {
-            tracker.algorithms.fusion.GapResult(0.0, DistanceSource.GAP_BRIDGE, "no steps measured in a long gap: treated as standing still")
+            tracker.algorithms.fusion.GapResult(0.0, DistanceSource.GAP_BRIDGE, "no step events in a long gap: not credited (no evidence of movement; this is NOT proof of standing still)")
         } else {
             GapReconciler.reconcile(chord, uncertainty, gapMs, pending, config, stride.sampleCount >= CALIBRATED_SAMPLES)
         }

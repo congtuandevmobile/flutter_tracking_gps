@@ -1,12 +1,12 @@
 name: Release flutter_tracking_gps
 
+# A normal push to main does NOT release. Only a push whose (latest) commit message contains
+# [release:flutter_tracking_gps] does, or a manual run. Same rule as the GitLab packages repo:
+#   branch == default branch && commit message =~ /[release:<package>]/
 on:
   push:
     branches:
       - main
-    paths:
-      - pubspec.yaml
-      - CHANGELOG.md
   workflow_dispatch:
 
 permissions:
@@ -14,6 +14,9 @@ permissions:
 
 jobs:
   release:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.head_commit.message, '[release:flutter_tracking_gps]')
     runs-on: ubuntu-latest
 
     steps:

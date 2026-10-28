@@ -23,3 +23,5 @@ Contract: `pigeons/tracking_api.dart` (generated in `TrackingApi.g.swift`).
 Added: `stepsPermissionStatus()` and `requestStepsPermission(completion:)` forwarded to the engine. `StartConfig.foregroundMode` is ignored on iOS.
 
 New `listSessions(completion:)`. The journal directory is `flutter_tracking_gps/journal` under Application Support.
+
+`updateNotification` is a no-op on iOS.

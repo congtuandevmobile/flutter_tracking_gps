@@ -68,6 +68,7 @@ object JournalCodec {
             is JournalRecord.StepsCorrection -> join("K", r.exactSteps)
             is JournalRecord.StepSensor -> join("A", b(r.active))
             is JournalRecord.Pdr -> join("D", r.segmentId, r.atMs, r.meters)
+            is JournalRecord.Finalized -> join("Z", b(r.stepsFinal))
         }
         return Wire.hex8(Wire.crc32(body)) + "|" + body
     }
@@ -100,6 +101,7 @@ object JournalCodec {
                 "K" -> need(f, 2) { JournalRecord.StepsCorrection(f[1].toLong()) }
                 "A" -> need(f, 2) { JournalRecord.StepSensor(f[1] == "1") }
                 "D" -> need(f, 4) { JournalRecord.Pdr(f[1].toInt(), f[2].toLong(), f[3].toDouble()) }
+                "Z" -> need(f, 2) { JournalRecord.Finalized(f[1] == "1") }
                 else -> null
             }
         } catch (e: NumberFormatException) {

@@ -19,7 +19,11 @@ internal interface DurableSink : JournalSink {
     /** The first write failure, or null. A failure never stops the recording; the engine shows it in the snapshot. */
     val failure: Throwable?
 
-    /** Lines accepted by [append] that are not on disk yet. Zero means everything appended is durable. */
+    /**
+     * Lines accepted by [append] that are not DURABLE yet: queued, or written to the OS but not yet
+     * `fsync`ed. Zero means everything appended survives even a power loss. (A process crash alone
+     * loses only the queued ones: the OS keeps what was written.)
+     */
     val pending: Int
 
     /** Drains the queue and releases the file. */
@@ -179,9 +183,30 @@ internal class FileJournalSink(private val file: File) : DurableSink {
     private fun run() {
         var out: FileOutputStream? = null
         var writer: OutputStreamWriter? = null
+        var unsynced = 0
+        var lastSyncMs = System.currentTimeMillis()
+
+        // fsync what was written; only then is it durable and no longer "pending".
+        fun sync() {
+            try {
+                writer?.flush()
+                out?.fd?.sync()
+            } catch (e: IOException) {
+                failure = failure ?: e
+            }
+            queued.addAndGet(-unsynced)
+            unsynced = 0
+            lastSyncMs = System.currentTimeMillis()
+        }
+
         try {
             while (true) {
-                when (val op = queue.take()) {
+                val op = queue.poll(IDLE_POLL_MS, TimeUnit.MILLISECONDS)
+                if (op == null) {
+                    if (unsynced > 0 && System.currentTimeMillis() - lastSyncMs >= SYNC_INTERVAL_MS) sync()
+                    continue
+                }
+                when (op) {
                     is Op.Line -> {
                         try {
                             if (writer == null) {
@@ -195,21 +220,17 @@ internal class FileJournalSink(private val file: File) : DurableSink {
                             writer.write(op.text)
                             writer.write("\n")
                             writer.flush()
+                            unsynced++
                         } catch (e: IOException) {
                             // Recording goes on; the loss is visible in the snapshot.
                             Log.e(LOG_TAG, "journal write failed", e)
                             failure = failure ?: e
-                        } finally {
-                            queued.decrementAndGet()
+                            queued.decrementAndGet() // not retried: it is no longer pending, it is lost
                         }
+                        if (unsynced > 0 && System.currentTimeMillis() - lastSyncMs >= SYNC_INTERVAL_MS) sync()
                     }
                     is Op.Barrier -> {
-                        try {
-                            writer?.flush()
-                            out?.fd?.sync()
-                        } catch (e: IOException) {
-                            failure = failure ?: e
-                        }
+                        sync()
                         op.done.countDown()
                     }
                     Op.Close -> return
@@ -226,5 +247,7 @@ internal class FileJournalSink(private val file: File) : DurableSink {
     private companion object {
         const val LOG_TAG = "FlutterTrackingGps"
         const val FLUSH_TIMEOUT_SECONDS = 10L
+        const val SYNC_INTERVAL_MS = 1_000L
+        const val IDLE_POLL_MS = 200L
     }
 }

@@ -8,3 +8,5 @@ Blocking I/O: call off the main thread. Tested through a memory implementation i
 
 ## Updated
 `DurableSink.pending` counts lines queued but not on disk (public as `journalPending`). `rewrite(_:lines:keepBackup:)` copies the original to `<name>.corrupt` first when the damage was in the MIDDLE of the file.
+
+`pending` now counts lines that are not DURABLE: queued, or written but not synchronized. The writer syncs a second after a write, and at every barrier.

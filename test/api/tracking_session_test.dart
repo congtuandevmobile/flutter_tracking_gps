@@ -166,6 +166,10 @@ class FakePlatform implements TrackingPlatform {
 
   @override
   Future<List<String>> listSessions() async => [?sessionId];
+
+  @override
+  Future<void> updateNotification(String title, String text) async =>
+      calls.add('notify:$title');
 }
 
 Future<void> pumpEvents() => Future<void>.delayed(Duration.zero);
@@ -303,6 +307,40 @@ void main() {
     await pumpEvents();
     expect(session.snapshot.state, RecordingState.finished);
     expect(session.snapshot.isDurable, isTrue);
+    await session.dispose();
+  });
+
+  test('the restore outcome and the notification API reach the app', () async {
+    final platform = FakePlatform();
+    final session = TrackingSession(platform: platform);
+    await session.start(sessionId: 's');
+    platform.snapshotController.add(
+      const PlatformSnapshot(
+        sessionId: 's',
+        state: PlatformState.paused,
+        segmentId: 0,
+        fixCount: 3,
+        restoreState: RestoreState.partial,
+        engineChanged: true,
+        distance: PlatformDistance(
+          quality: GpsQuality.unknown,
+          totalMeters: 10,
+          gpsMeters: 10,
+          gapBridgeMeters: 0,
+          pdrMeters: 0,
+          pendingPdrMeters: 0,
+          movingTime: Duration.zero,
+          isStopped: false,
+          distanceEligibleSteps: 7,
+        ),
+      ),
+    );
+    await pumpEvents();
+    expect(session.snapshot.restoreState, RestoreState.partial);
+    expect(session.snapshot.engineChanged, isTrue);
+    expect(session.snapshot.distanceEligibleSteps, 7);
+    await session.updateNotification(title: 'T', text: 'x');
+    expect(platform.calls, contains('notify:T'));
     await session.dispose();
   });
 }

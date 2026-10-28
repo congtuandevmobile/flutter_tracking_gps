@@ -33,6 +33,7 @@ One record per line: `CRC32|TYPE|field|field|...`
 | `K` | An exact step count for the segment just closed |
 | `A` | Step sensor active / inactive |
 | `D` | A step estimate from the app (`submitPdr`) |
+| `Z` | Finalized: written once after `Finish`; whether the step total was settled (exact) or only the live count |
 
 ## Reading
 
@@ -87,8 +88,10 @@ one. Calendar time (`wallTimeMs`) is carried per fix for display and export.
 
 ## Durability
 
-A record is durable once the writer wrote it; `pending` (public as `journalPending`) counts
-the ones that are not. `flush` is the barrier; `finish` returns only after it. Damage in the
+Three levels: queued (accepted, not written), written (in the OS, survives a process
+crash) and durable (`fsync`ed, survives a power loss). `pending` (public as `journalPending`)
+counts everything that is not durable yet; the writer syncs at most a second behind and at
+every barrier. `flush` is the barrier; `finish` returns only after it. Damage in the
 middle of the file is reported, never silently skipped, and the original is kept as
 `<file>.corrupt` before the repair.
 

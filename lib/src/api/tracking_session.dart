@@ -197,6 +197,12 @@ class TrackingSession {
     _apply(native);
   }
 
+  /// Android: replaces the text of the SDK's foreground notification (iOS: no-op).
+  /// The SDK keeps the channel, the tap action and the lifecycle; a presenter
+  /// that wants a richer notification calls this instead of posting its own.
+  Future<void> updateNotification({required String title, required String text}) =>
+      _platform.updateNotification(title, text);
+
   /// A step-based estimate for a stretch without GPS; held as pending by native
   /// until the GPS that returns confirms it (see [PdrPolicy]).
   Future<void> submitPdr(double meters) async {
@@ -262,6 +268,9 @@ class TrackingSession {
       stepsStatus: native.stepsStatus,
       stepsFinal: native.stepsFinal,
       journalPending: native.journalPending,
+      restoreState: native.restoreState,
+      engineChanged: native.engineChanged,
+      distanceEligibleSteps: d.distanceEligibleSteps,
       activeTime: d.activeTime,
       bridgedGap: d.bridgedGap,
       uncreditedGap: d.uncreditedGap,
@@ -295,6 +304,9 @@ class TrackingSession {
         next.error != _last.error ||
         next.stepsFinal != _last.stepsFinal ||
         next.journalPending != _last.journalPending ||
+        next.restoreState != _last.restoreState ||
+        next.engineChanged != _last.engineChanged ||
+        next.distanceEligibleSteps != _last.distanceEligibleSteps ||
         next.uncreditedGap != _last.uncreditedGap ||
         next.bridgedGap != _last.bridgedGap ||
         next.ambiguousSteps != _last.ambiguousSteps;

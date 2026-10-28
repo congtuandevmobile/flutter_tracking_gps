@@ -11,3 +11,5 @@ Every engine setting as primitives (20 of them: the 15 of `TrackingConfig`, `ini
 Used by `JournalCodec` and `SessionRecorder`. Tested by `JournalTest`.
 
 `Header.engineVersion` is the rules version that produced the recorded result.
+
+`Finalized(stepsFinal)`: written once after `Finish`; true when the platform's exact step count was obtained (or there is no step sensor).
