@@ -43,7 +43,9 @@ final class TrackingEngine: LocationProviderDelegate {
     private let provider: LocationProviding
     private let store: JournalStoring
     private let steps: StepProviding
+    private let motion: MotionProviding
     private let monotonicMs: () -> Int64
+    private let cadenceClockMs: () -> Int64
     private let wallNow: () -> Date
     private let queue = DispatchQueue(label: "io.github.congtuandevmobile.flutter_tracking_gps.engine", qos: .userInitiated)
     private let storeQueue = DispatchQueue(label: "io.github.congtuandevmobile.flutter_tracking_gps.store", qos: .utility)
@@ -94,6 +96,15 @@ final class TrackingEngine: LocationProviderDelegate {
     /// The one finish in progress: a second `stop` joins it instead of starting another.
     private var finishOp: FinishOperation?
 
+    // Pedal cadence (live only: never journaled, no effect on distance).
+    private var pedalCadence = false
+    private var cadenceStatus: NativeMotionStatus = .off
+    private let cadence = PedalCadenceEstimator.Companion.shared.standard()
+    /// An external cadence sensor fed by the host (never journaled, no effect on distance). Same clock as `cadence`.
+    private let externalCadence = ExternalCadenceHub.Companion.shared.standard()
+    /// Bumped whenever the accelerometer subscription ends, so a reading queued before it cannot reach a later segment.
+    private var cadenceGeneration = 0
+
     /// A finish in progress, bound to the session it started for. Every asynchronous boundary re-checks it.
     private final class FinishOperation {
         let token: Int
@@ -107,14 +118,18 @@ final class TrackingEngine: LocationProviderDelegate {
     init(
         provider: LocationProviding, store: JournalStoring,
         steps: StepProviding = CoreMotionStepProvider(),
+        motion: MotionProviding = CoreMotionAccelerometerProvider(),
         monotonicMs: @escaping () -> Int64 = monotonicNowMs,
-        wallNow: @escaping () -> Date = Date.init
+        wallNow: @escaping () -> Date = Date.init,
+        cadenceClockMs: @escaping () -> Int64 = { Int64((ProcessInfo.processInfo.systemUptime * 1000).rounded()) }
     ) {
         self.provider = provider
         self.store = store
         self.steps = steps
+        self.motion = motion
         self.monotonicMs = monotonicMs
         self.wallNow = wallNow
+        self.cadenceClockMs = cadenceClockMs
         provider.delegate = self
     }
 
@@ -171,6 +186,7 @@ final class TrackingEngine: LocationProviderDelegate {
             if self.state == .running { self.provider.stopUpdates() }
             self.stopTicker()
             self.endSteps()
+            self.endCadence()
             self.beginNewSession()
             // A fresh journal: a new start must never be mixed with an old one of the same id.
             do {
@@ -187,6 +203,7 @@ final class TrackingEngine: LocationProviderDelegate {
             let newExtras = [
                 "intervalMs": String(config.intervalMs), "minDistanceMeters": String(config.minDistanceMeters),
                 "stepsEnabled": String(config.stepsEnabled),
+                "pedalCadence": String(config.pedalCadence),
                 // Kept in the journal so a recovery without Flutter knows the limit the app chose.
                 "maxRecoverGapMs": String(config.maxRecoverGapMs),
             ]
@@ -232,6 +249,9 @@ final class TrackingEngine: LocationProviderDelegate {
             self.minDistanceMeters = config.minDistanceMeters
             self.adaptive = config.adaptiveSampling
             self.stepsEnabled = config.stepsEnabled
+            self.pedalCadence = config.pedalCadence
+            self.cadenceStatus = .off
+            self.externalCadence.reset()
             self.stepsStatus = .off
             self.stepsEverActive = false
             self.liveStepsFinal = false
@@ -247,6 +267,7 @@ final class TrackingEngine: LocationProviderDelegate {
                 self.state = .running
                 self.startTicker()
                 self.beginSteps()
+                self.beginCadence()
                 self.publish()
                 self.deliver(.success(self.makeSnapshot()), to: completion)
             } catch TrackingNativeError.missingBackgroundMode {
@@ -281,6 +302,7 @@ final class TrackingEngine: LocationProviderDelegate {
                 self.state = .paused
                 self.recorder?.pause(atMs: self.monotonicMs())
                 self.closeStepSegment(completion: nil)
+                self.endCadence()
                 self.publish()
                 // Acknowledged only once the pause is DURABLE: a process killed right after the call must not come
                 // back recording what the person had just paused.
@@ -332,6 +354,7 @@ final class TrackingEngine: LocationProviderDelegate {
                 self.state = .running
                 self.startTicker()
                 self.beginSteps()
+                self.beginCadence()
                 self.publish()
                 self.deliver(.success(self.makeSnapshot()), to: completion)
             } catch {
@@ -365,6 +388,7 @@ final class TrackingEngine: LocationProviderDelegate {
             let wasRunning = self.state == .running
             self.provider.stopUpdates()
             self.stopTicker()
+            self.endCadence()
             // FINISHING until the exact step count is in and the journal is durable: nothing published
             // meanwhile may pass for a final result.
             self.state = .finishing
@@ -442,6 +466,47 @@ final class TrackingEngine: LocationProviderDelegate {
         }
     }
 
+    /// External cadence from the host (a raw CSC notification, a ready rpm, a connection state). Only for the open
+    /// session; garbage never touches the recording.
+    func pushCsc(sessionId id: String, sourceId: String, connectionId: Int64, data: Data) {
+        let bytes = KotlinByteArray(size: Int32(data.count))
+        for (i, b) in data.enumerated() { bytes.set(index: Int32(i), value: Int8(bitPattern: b)) }
+        withExternalCadence(id) { hub, now in hub.onCsc(sourceId: sourceId, connectionId: connectionId, bytes: bytes, nowMs: now) }
+    }
+
+    func pushExternalRpm(sessionId id: String, sourceId: String, connectionId: Int64, rpm: Double) {
+        withExternalCadence(id) { hub, now in hub.onRpm(sourceId: sourceId, connectionId: connectionId, rpm: rpm, nowMs: now) }
+    }
+
+    func setExternalConnected(sessionId id: String, sourceId: String, connectionId: Int64, connected: Bool) {
+        withExternalCadence(id) { hub, _ in hub.onConnection(sourceId: sourceId, connectionId: connectionId, connected: connected) }
+    }
+
+    private func withExternalCadence(_ id: String, _ block: @escaping (ExternalCadenceHub, Int64) -> Void) {
+        // The receipt time is taken NOW, on the caller's thread: a notification that waits in the queue keeps its time.
+        let receivedMs = cadenceNowMs()
+        queue.async { [weak self] in
+            guard let self = self, id == self.sessionId, self.state == .running || self.state == .paused else { return }
+            block(self.externalCadence, receivedMs)
+        }
+    }
+
+    /// The cadence to show: a healthy external sensor, else the phone estimate, only while recording (queue).
+    private func resolveCadence() -> CadenceChoice {
+        guard state == .running else { return CadenceChoice(rpm: PedalCadenceEstimator.Companion.shared.UNKNOWN, source: .none) }
+        let now = cadenceNowMs()
+        let phone = pedalCadence && cadenceStatus == .active ? cadence.rpm(nowMs: now) : PedalCadenceEstimator.Companion.shared.UNKNOWN
+        return externalCadence.resolve(phoneRpm: phone, nowMs: now)
+    }
+
+    private static func nativeSource(_ source: CadenceSource) -> NativeCadenceSource {
+        switch source {
+        case .phone: return .phone
+        case .external: return .externalSensor
+        default: return .none
+        }
+    }
+
     /// After a process death: replays the session's journal (with the configuration stored in ITS header,
     /// not the one the app passes now) and leaves the session PAUSED. A damaged last record is dropped and
     /// the journal repaired so new records can be appended; damage in the middle keeps only the intact part
@@ -515,6 +580,8 @@ final class TrackingEngine: LocationProviderDelegate {
                 }
                 self.stopTicker()
                 self.endSteps()
+                self.endCadence()
+                self.cadence.reset()
                 if self.state == .running { self.provider.stopUpdates() }
                 // The core decides what is trustworthy: intact (CRC) AND applicable. Nothing is appended before the repair.
                 let plan = SessionRecorder.Companion.shared.plan(lines: lines)
@@ -558,6 +625,9 @@ final class TrackingEngine: LocationProviderDelegate {
                 self.extras = result.extras
                 self.adaptive = (JournalCodec.shared.decode(line: usable[0]) as? JournalRecord.Header)?.settings.adaptiveSampling ?? false
                 self.stepsEnabled = result.extras["stepsEnabled"] == "true"
+                self.pedalCadence = result.extras["pedalCadence"] == "true"
+                self.cadenceStatus = .off
+                self.externalCadence.reset()
                 self.stepsStatus = .off
                 self.stepsEverActive = false
                 self.liveStepsFinal = false
@@ -610,6 +680,7 @@ final class TrackingEngine: LocationProviderDelegate {
             try provider.startUpdates(minDistanceMeters: minDistanceMeters)
             startTicker()
             beginSteps()
+            beginCadence()
         } catch {
             // The session's clock was recovered, but location cannot start: say so, do not look as if recording.
             collectorFailed = true
@@ -913,6 +984,57 @@ final class TrackingEngine: LocationProviderDelegate {
         tickTimer = nil
     }
 
+    // MARK: - Pedal cadence (queue)
+
+    /// Starts the accelerometer for the segment that just opened, when the pedal cadence was asked for. A missing or
+    /// failing sensor only sets `cadenceStatus` and `lastError` with a stable code: the recording goes on. The estimator
+    /// starts empty on every segment, so a paused interval is never read as a rhythm.
+    private func beginCadence() {
+        guard pedalCadence else {
+            cadenceStatus = .off
+            return
+        }
+        cadence.reset()
+        cadenceGeneration += 1
+        guard motion.isAvailable else {
+            cadenceStatus = .unavailable
+            lastError = "\(TrackingErrorCode.cadenceFailed): \(MotionError.unavailable.message)"
+            return
+        }
+        cadenceStatus = .active
+        let generation = cadenceGeneration
+        motion.startUpdates { [weak self] result in
+            self?.queue.async { [weak self] in
+                guard let self = self, generation == self.cadenceGeneration, self.state == .running else { return }
+                switch result {
+                case .success(let reading):
+                    // Same time domain as `cadenceNowMs()`: no offset to another clock that could drift across a sleep.
+                    let sampleMs = Int64((reading.timestamp * 1000).rounded())
+                    self.cadence.push(timeMs: sampleMs, x: reading.x, y: reading.y, z: reading.z)
+                case .failure(let error):
+                    // A runtime failure is reported, never swallowed.
+                    self.endCadence()
+                    self.cadence.reset()
+                    if case .unavailable = error { self.cadenceStatus = .unavailable } else { self.cadenceStatus = .failed }
+                    self.lastError = "\(error.code): \(error.message)"
+                    self.publish()
+                }
+            }
+        }
+    }
+
+    /// Ends the accelerometer subscription (a pause, the stop, or a new session replacing an open one).
+    /// The cadence estimator's own clock: the same one as `CMLogItem.timestamp` (`systemUptime`). Cadence is live-only
+    /// and independent of the GPS clock, so its samples are never converted to another time domain.
+    private func cadenceNowMs() -> Int64 { cadenceClockMs() }
+
+    private func endCadence() {
+        cadenceGeneration += 1
+        motion.stopUpdates()
+        // `active` means the sensor is collecting: it is not any more. A failure keeps its status (it says why).
+        if cadenceStatus == .active { cadenceStatus = .off }
+    }
+
     // MARK: - Snapshot (queue)
 
     private func makeSnapshot() -> NativeSnapshot {
@@ -921,12 +1043,15 @@ final class TrackingEngine: LocationProviderDelegate {
             error = "\(TrackingErrorCode.storeWriteFailed): \(failure.localizedDescription)"
         }
         let finalSteps = state == .stopped && (restoredStepsFinal ?? liveStepsFinal)
+        let choice = resolveCadence()
         return NativeSnapshot(
             stepsStatus: stepsStatus, restoreState: restoreState, engineChanged: engineChanged,
             journalPending: Int64(sink?.pending ?? 0), journalFailed: sink?.failure != nil,
             elapsedTimeMs: recorder?.elapsedTimeMs(nowMs: monotonicMs()) ?? 0,
             recoveredGapMs: recorder?.recoveredGapMs ?? 0, clockAnomaly: recorder?.clockAnomaly ?? false,
-            collection: collection, stepsFinal: finalSteps,
+            collection: collection,
+            pedalCadenceRpm: choice.rpm, cadenceSource: Self.nativeSource(choice.source),
+            cadenceStatus: cadenceStatus, stepsFinal: finalSteps,
             sessionId: sessionId, state: state, segmentId: segmentId, distance: makeDistance(),
             fixCount: fixCount, lastFixTimeMs: lastFixTimeMs,
             updatedAtMs: wallMs(wallNow()), error: error)

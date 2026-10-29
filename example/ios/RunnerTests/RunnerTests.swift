@@ -89,6 +89,45 @@ private final class FakeSteps: StepProviding {
     func fail(_ error: StepError) { handler?(.failure(error)) }
 }
 
+/// A fake accelerometer: tests push readings by hand, in seconds since the sensor was started.
+private final class FakeMotion: MotionProviding {
+    var available = true
+    var isAvailable: Bool { available }
+    private var handler: ((Result<AccelReading, MotionError>) -> Void)?
+    private var base: TimeInterval = 0
+    private(set) var starts = 0
+    private(set) var stops = 0
+
+    func startUpdates(handler: @escaping (Result<AccelReading, MotionError>) -> Void) {
+        starts += 1
+        base = ProcessInfo.processInfo.systemUptime
+        self.handler = handler
+    }
+
+    func stopUpdates() {
+        stops += 1
+        handler = nil
+    }
+
+    func push(at seconds: Double, _ x: Double, _ y: Double, _ z: Double) {
+        handler?(.success(AccelReading(timestamp: base + seconds, x: x, y: y, z: z)))
+    }
+
+    func fail(_ error: MotionError) { handler?(.failure(error)) }
+
+    /// A leg-mounted phone at 50 Hz: gravity plus a periodic motion at `rpm` on a tilted axis.
+    func pedal(from: Int, seconds: Int, rpm: Double) {
+        let w = 2.0 * Double.pi * rpm / 60.0
+        var t = Double(from)
+        let end = Double(from + seconds)
+        while t < end {
+            let s = 1.5 * sin(w * t)
+            push(at: t, 0.6 * s, -0.5 * s, 9.81 + 0.62 * s)
+            t += 0.02
+        }
+    }
+}
+
 /// An in-memory journal store with the same contract as the file one.
 private final class MemoryStore: JournalStoring {
     var files: [String: [String]] = [:]
@@ -164,11 +203,15 @@ final class RunnerTests: XCTestCase {
     private let clock = TestClock()
 
     private func makeEngine(
-        _ provider: FakeProvider, _ store: MemoryStore = MemoryStore(), steps: FakeSteps? = nil
+        _ provider: FakeProvider, _ store: MemoryStore = MemoryStore(), steps: FakeSteps? = nil,
+        motion: FakeMotion? = nil, cadenceClockMs: (() -> Int64)? = nil
     ) -> TrackingEngine {
-        TrackingEngine(
+        let defaultClock: () -> Int64 = { Int64((ProcessInfo.processInfo.systemUptime * 1000).rounded()) }
+        return TrackingEngine(
             provider: provider, store: store, steps: steps ?? FakeSteps(clock: clock),
-            monotonicMs: { self.clock.mono }, wallNow: { self.clock.wall })
+            motion: motion ?? FakeMotion(),
+            monotonicMs: { self.clock.mono }, wallNow: { self.clock.wall },
+            cadenceClockMs: cadenceClockMs ?? defaultClock)
     }
 
     private func engineConfig(stride: Double = -1, maxSpeed: Double = 10) -> EngineConfig {
@@ -182,10 +225,10 @@ final class RunnerTests: XCTestCase {
 
     private func config(
         _ id: String = "s", adaptive: Bool = false, steps: Bool = false, stride: Double = -1, maxSpeed: Double = 10,
-        recover: Bool = false, maxGapMs: Int64 = 0
+        recover: Bool = false, maxGapMs: Int64 = 0, pedalCadence: Bool = false
     ) -> StartConfig {
         StartConfig(
-            recoverRunning: recover, maxRecoverGapMs: maxGapMs,
+            pedalCadence: pedalCadence, recoverRunning: recover, maxRecoverGapMs: maxGapMs,
             stepsEnabled: steps, initialSteps: 0,
             engine: engineConfig(stride: stride, maxSpeed: maxSpeed),
             adaptiveSampling: adaptive, batterySaver: false,
@@ -419,6 +462,181 @@ final class RunnerTests: XCTestCase {
         XCTAssertEqual(ids, ["a"])
         let _: Void = try run { engine.clearSession("a", completion: $0) }
         XCTAssertEqual(store.files["a"] ?? [], [])
+    }
+
+    // MARK: - External cadence (a sensor the host feeds)
+
+    private var cadenceNow: Int64 = 0
+
+    private func cscData(_ count: Int, _ ticks: Int) -> Data {
+        Data([0x02, UInt8(count & 0xFF), UInt8(count >> 8), UInt8(ticks & 0xFF), UInt8(ticks >> 8)])
+    }
+
+    private func externalEngine() -> TrackingEngine {
+        cadenceNow = 0
+        return makeEngine(FakeProvider(clock: clock), cadenceClockMs: { self.cadenceNow })
+    }
+
+    /// A crank at 80 rpm: a revolution every 750 ms, a notification each time.
+    private func crank(_ engine: TrackingEngine, from fromMs: Int64, to toMs: Int64, id: String = "s", conn: Int64 = 1) {
+        var t = fromMs
+        var count = 100
+        var ticks = 1000
+        while t <= toMs {
+            cadenceNow = t
+            engine.pushCsc(sessionId: id, sourceId: "sensor", connectionId: conn, data: cscData(count, ticks))
+            count += 1; ticks += 768; t += 750
+        }
+        drain(engine)
+    }
+
+    func testAnExternalCrankSensorGivesTheCadenceWithoutThePhoneEstimate() throws {
+        let engine = externalEngine()
+        let _: NativeSnapshot = try run { engine.start(config: config(), completion: $0) }
+        engine.setExternalConnected(sessionId: "s", sourceId: "sensor", connectionId: 1, connected: true)
+        crank(engine, from: 0, to: 3000)
+        let s = engine.snapshot()
+        XCTAssertEqual(s.cadenceStatus, .off)
+        XCTAssertEqual(s.cadenceSource, .externalSensor)
+        XCTAssertEqual(s.pedalCadenceRpm, 80, accuracy: 0.5)
+        XCTAssertEqual(s.distance.totalMeters, 0)
+    }
+
+    func testAStillCrankIsZeroAndLosingTheSensorIsNotZero() throws {
+        let engine = externalEngine()
+        let _: NativeSnapshot = try run { engine.start(config: config(), completion: $0) }
+        engine.setExternalConnected(sessionId: "s", sourceId: "sensor", connectionId: 1, connected: true)
+        crank(engine, from: 0, to: 3000)
+        var t: Int64 = 3000
+        while t < 8000 {
+            t += 1000
+            cadenceNow = t
+            engine.pushCsc(sessionId: "s", sourceId: "sensor", connectionId: 1, data: cscData(104, 1000 + 4 * 768))
+        }
+        drain(engine)
+        let still = engine.snapshot()
+        XCTAssertEqual(still.cadenceSource, .externalSensor)
+        XCTAssertEqual(still.pedalCadenceRpm, 0)
+        engine.setExternalConnected(sessionId: "s", sourceId: "sensor", connectionId: 1, connected: false)
+        drain(engine)
+        let lost = engine.snapshot()
+        XCTAssertEqual(lost.cadenceSource, .none)
+        XCTAssertLessThan(lost.pedalCadenceRpm, 0)
+    }
+
+    func testAQuietSensorIsUnknownNeverZero() throws {
+        let engine = externalEngine()
+        let _: NativeSnapshot = try run { engine.start(config: config(), completion: $0) }
+        engine.setExternalConnected(sessionId: "s", sourceId: "sensor", connectionId: 1, connected: true)
+        crank(engine, from: 0, to: 3000)
+        cadenceNow = 10_000
+        let s = engine.snapshot()
+        XCTAssertEqual(s.cadenceSource, .none)
+        XCTAssertLessThan(s.pedalCadenceRpm, 0)
+    }
+
+    func testExternalCadenceOfAnotherSessionOrAFinishedOneIsDropped() throws {
+        let engine = externalEngine()
+        let _: NativeSnapshot = try run { engine.start(config: config(), completion: $0) }
+        engine.setExternalConnected(sessionId: "other", sourceId: "sensor", connectionId: 1, connected: true)
+        crank(engine, from: 0, to: 3000, id: "other")
+        XCTAssertEqual(engine.snapshot().cadenceSource, .none)
+        let _: NativeSnapshot = try run { engine.stop(sessionId: "s", completion: $0) }
+        engine.setExternalConnected(sessionId: "s", sourceId: "sensor", connectionId: 1, connected: true)
+        crank(engine, from: 4000, to: 7000)
+        XCTAssertLessThan(engine.snapshot().pedalCadenceRpm, 0)
+    }
+
+    func testAPausedSessionShowsNoExternalCadenceAndResumesWithAHealthySensor() throws {
+        let engine = externalEngine()
+        let _: NativeSnapshot = try run { engine.start(config: config(), completion: $0) }
+        engine.setExternalConnected(sessionId: "s", sourceId: "sensor", connectionId: 1, connected: true)
+        crank(engine, from: 0, to: 3000)
+        let paused: NativeSnapshot = try run { engine.pause(sessionId: "s", completion: $0) }
+        XCTAssertLessThan(paused.pedalCadenceRpm, 0, "no cadence while paused")
+        crank(engine, from: 3750, to: 5250) // the sensor keeps notifying during the pause
+        let resumed: NativeSnapshot = try run { engine.resume(sessionId: "s", completion: $0) }
+        XCTAssertEqual(resumed.cadenceSource, .externalSensor)
+    }
+
+    func testGarbageFromTheHostNeverBreaksTheRecording() throws {
+        let engine = externalEngine()
+        let _: NativeSnapshot = try run { engine.start(config: config(), completion: $0) }
+        engine.setExternalConnected(sessionId: "s", sourceId: "sensor", connectionId: 1, connected: true)
+        engine.pushCsc(sessionId: "s", sourceId: "sensor", connectionId: 1, data: Data())
+        engine.pushCsc(sessionId: "s", sourceId: "sensor", connectionId: 1, data: Data([0x02, 1]))
+        engine.pushExternalRpm(sessionId: "s", sourceId: "sensor", connectionId: 1, rpm: .nan)
+        engine.pushExternalRpm(sessionId: "s", sourceId: "sensor", connectionId: 1, rpm: 9999)
+        drain(engine)
+        let s = engine.snapshot()
+        XCTAssertEqual(s.state, .running)
+        XCTAssertEqual(s.cadenceSource, .none)
+    }
+
+    // MARK: - Pedal cadence
+
+    func testPedalCadenceFromTheAccelerometerAppearsInTheSnapshotAndNeverInTheDistance() throws {
+        let motion = FakeMotion()
+        let engine = makeEngine(FakeProvider(clock: clock), motion: motion)
+        let started: NativeSnapshot = try run { engine.start(config: config(pedalCadence: true), completion: $0) }
+        XCTAssertEqual(started.cadenceStatus, .active)
+        XCTAssertEqual(motion.starts, 1)
+        XCTAssertLessThan(started.pedalCadenceRpm, 0, "unknown until a window was seen")
+        motion.pedal(from: 0, seconds: 14, rpm: 90)
+        drain(engine)
+        clock.seconds = 14
+        let s = engine.snapshot()
+        XCTAssertEqual(s.pedalCadenceRpm, 90, accuracy: 4, "rpm \(s.pedalCadenceRpm)")
+        XCTAssertEqual(s.distance.totalMeters, 0)
+    }
+
+    func testPedalCadenceIsOffUnlessAskedFor() throws {
+        let motion = FakeMotion()
+        let engine = makeEngine(FakeProvider(clock: clock), motion: motion)
+        let started: NativeSnapshot = try run { engine.start(config: config(), completion: $0) }
+        XCTAssertEqual(started.cadenceStatus, .off)
+        XCTAssertEqual(motion.starts, 0, "the accelerometer is not touched")
+        XCTAssertLessThan(started.pedalCadenceRpm, 0)
+    }
+
+    func testPauseStopsTheAccelerometerAndAPausedSessionHasNoCadence() throws {
+        let motion = FakeMotion()
+        let engine = makeEngine(FakeProvider(clock: clock), motion: motion)
+        let _: NativeSnapshot = try run { engine.start(config: config(pedalCadence: true), completion: $0) }
+        motion.pedal(from: 0, seconds: 14, rpm: 90)
+        drain(engine)
+        clock.seconds = 14
+        XCTAssertGreaterThan(engine.snapshot().pedalCadenceRpm, 0)
+        let stopsBefore = motion.stops
+        let paused: NativeSnapshot = try run { engine.pause(sessionId: "s", completion: $0) }
+        XCTAssertEqual(motion.stops, stopsBefore + 1)
+        XCTAssertLessThan(paused.pedalCadenceRpm, 0, "no cadence while paused")
+        let resumed: NativeSnapshot = try run { engine.resume(sessionId: "s", completion: $0) }
+        XCTAssertEqual(motion.starts, 2)
+        XCTAssertLessThan(resumed.pedalCadenceRpm, 0, "a new segment starts with an empty window")
+    }
+
+    func testAMissingAccelerometerNeverStopsTheRecording() throws {
+        let motion = FakeMotion()
+        motion.available = false
+        let engine = makeEngine(FakeProvider(clock: clock), motion: motion)
+        let started: NativeSnapshot = try run { engine.start(config: config(pedalCadence: true), completion: $0) }
+        XCTAssertEqual(started.state, .running)
+        XCTAssertEqual(started.cadenceStatus, .unavailable)
+        XCTAssertTrue(started.error?.hasPrefix("CADENCE_FAILED") == true, started.error ?? "nil")
+        XCTAssertEqual(motion.starts, 0)
+    }
+
+    func testAFailingAccelerometerIsReportedAndTheRecordingGoesOn() throws {
+        let motion = FakeMotion()
+        let engine = makeEngine(FakeProvider(clock: clock), motion: motion)
+        let _: NativeSnapshot = try run { engine.start(config: config(pedalCadence: true), completion: $0) }
+        motion.fail(.failed("sensor died"))
+        drain(engine)
+        let s = engine.snapshot()
+        XCTAssertEqual(s.cadenceStatus, .failed)
+        XCTAssertEqual(s.state, .running)
+        XCTAssertTrue(s.error?.hasPrefix("CADENCE_FAILED") == true, s.error ?? "nil")
     }
 
     // MARK: - Steps

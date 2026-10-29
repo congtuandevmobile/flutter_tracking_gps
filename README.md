@@ -397,14 +397,73 @@ cadence(now, total):
 - Android may stamp a reading with the time of the LAST step and report it ~10 s late, and iOS updates in batches, so cadence lags
   and can read low at the start of a window.
 
-### Cycling: pedal cadence (rpm) is not available from the phone
+### Cycling: pedal cadence (rpm) from the accelerometer
 
-The step sensor counts steps, not pedal revolutions, so a step-derived value is not a cycling cadence. Enable `stepsEnabled` only for
-sports where steps mean something (running, walking). Pedal cadence needs a dedicated source: a BLE Cycling Speed and Cadence sensor
-or a sports watch. The SDK has no such source today (BLE is deliberately out of scope), so a host that wants rpm must add one
-as another producer of events. Counting is simply revolutions per minute: `rpm = crank revolutions in an interval ÷ minutes`, for
-example 45 pedal-downs of one leg in 30 s is 45 × 2 = 90 rpm. The rpm cannot be inferred reliably from GPS speed alone, because it
-also depends on the gear ratio and wheel size, which the SDK does not know.
+The step sensor counts steps, not pedal revolutions, so a step-derived value is not a cycling cadence: enable `stepsEnabled` only for
+sports where steps mean something (running, walking). For pedalling, `createSession(pedalCadence: true)` estimates **rpm from the
+accelerometer of a phone carried on the leg** (trouser pocket, thigh) and publishes it as `snapshot.pedalCadenceRpm` (`double?`,
+null = unknown) with `snapshot.cadenceStatus` (`off`, `active`, `unavailable`, `failed`). No permission is needed.
+
+```
+native reads the accelerometer (Android TYPE_ACCELEROMETER, iOS CMMotionManager, about 50 Hz) ─► PedalCadenceEstimator (core)
+   1. last 8 s averaged into 50 ms bins (box filter), a few empty bins interpolated
+   2. mean of each axis removed; the axis of greatest variance found (power iteration) and the signal projected on it
+      (the phone's orientation in the pocket is unknown; a projection keeps the fundamental, the vector magnitude would double it)
+   3. standard deviation below 0.2 m/s² → no pedalling motion → unknown
+   4. normalized autocorrelation over 30–130 rpm; best peak below 0.4 → not periodic → unknown;
+      the smallest lag near the best peak wins (avoids picking twice the period); parabolic interpolation; rpm = 60 · fs / lag
+   5. exponential smoothing (0.4); recomputed once a second; held 5 s after the last good estimate; stale feed (3 s) → unknown
+```
+
+- **Live only.** It is not journaled and has no effect on distance, so the journal and the engine rules are untouched. A paused session
+  reports null, each resume starts with an empty window, and after a restore it is null until a new window has been seen (the flag is
+  remembered in the journal header, so a recovered recording turns it back on).
+- **Placement decides everything.** On the leg the periodic motion is clear; on the handlebar the sensor sees road vibration, not
+  the legs, and the estimate is mostly unknown or wrong. Coasting with the legs still gives unknown (by design, no guess).
+- **Not validated on a real bike.** Every number above is a starting value chosen by reasoning (the method follows frequency-domain
+  and autocorrelation cadence estimation from the literature, which targets walking; no cycling validation was found). On synthetic
+  signals the tests stay within ±3–4 rpm for steady rhythms between 60 and 110 rpm. Measure with a BLE cadence sensor before trusting
+  it, and expect the battery to pay for holding the accelerometer.
+- A cadence sensor outside the phone is the accurate source: see the next section. Rpm cannot be inferred from GPS speed, because it
+  also depends on the gear ratio and the wheel size.
+
+### Cycling: an external cadence sensor (fed by the host)
+
+The package does **not** scan, pair or reconnect to Bluetooth devices, and declares no Bluetooth permission. The host owns the
+connection (with a BLE plugin or its own native code) and hands the data over; the package decodes it, chooses the source and
+publishes one value.
+
+```dart
+await session.setExternalCadenceConnected(sourceId: id, connectionId: n, connected: true);
+// for every notification of the Cycling Speed and Cadence Measurement characteristic (0x2A5B):
+await session.pushCscMeasurement(bytes, sourceId: id, connectionId: n);
+// a cadence that is already in rpm (a power meter, an adapter):
+await session.pushExternalCadence(rpm, sourceId: id, connectionId: n);
+// the sensor was lost:
+await session.setExternalCadenceConnected(sourceId: id, connectionId: n, connected: false);
+```
+
+- **Identity.** `sourceId` names the device; `connectionId` is a number the host increases for every NEW connection to it. Data of an
+  older connection, of a connection that was closed, or of another session is dropped, and the counters of a new connection are never
+  compared with those of the old one (a reset sensor is not read as a rollover).
+- **Decoding (CSC).** Flags bit 0 = wheel data, bit 1 = crank data; a wheel-only or truncated packet carries no cadence and is
+  ignored. The cadence is computed between two consecutive crank EVENTS, so the 16-bit revolution counter and the 16-bit event
+  clock (1/1024 s, wraps every 64 s) may wrap. When the previous revolution is 60 s or more in the past, or the counter moved by more
+  than the elapsed time allows at 220 rpm, the two samples are not comparable and a new baseline is taken. Values outside 15–220 rpm
+  are not a cadence.
+- **0 rpm is a measurement, silence is not.** The cranks count as stopped only when valid notifications keep arriving with an unchanged
+  counter for longer than a revolution can take (3 s, or twice the last revolution time if longer; a 20 rpm cadence is not read as
+  stopped). When notifications stop altogether the value becomes unknown after 5 s, never 0.
+- **One source, never mixed.** A healthy external sensor wins over the phone estimate, which wins over nothing; `cadenceSource` says
+  which (`none`, `phone`, `externalSensor`). Health is connection + freshness, never the value: an external 0 keeps the source and does
+  not fall back to the phone. A lost or stale sensor falls back at once; after a (re)connect or a stale spell it must deliver two valid
+  values over at least 1 s before it is preferred again, so an intermittent sensor does not flap.
+- **Live only.** Nothing is journaled, distance is untouched, the journal format and the engine version do not change. The hub is empty
+  after a start or a restore: the host reports the connection again.
+- **The host keeps the connection alive.** If the host's BLE component stops (for example the Flutter engine is gone while the native
+  recorder keeps going), no data arrives and the cadence falls back to the phone estimate (when `pedalCadence` is on) or to unknown.
+  Reconnecting in the background, and after a process death, is the host's job.
+- Not validated with real sensors on a device.
 
 | Figure | Source | Computed by | Smoothing |
 |---|---|---|---|
@@ -412,7 +471,8 @@ also depends on the gear ratio and wheel size, which the SDK does not know.
 | Current pace / speed | `speedMps` (Doppler) | host | **none from the SDK** |
 | Average pace / speed | `totalMeters`, `movingTime` | host | whole-session average |
 | Cadence (steps/min) | `steps` | host | host-chosen window |
-| Pedal cadence (rpm) | not available | needs a BLE sensor or watch | not applicable |
+| Pedal cadence (rpm) | accelerometer on the leg (`pedalCadence: true`) | engine core, live only | exponential, 8 s window |
+| Pedal cadence (rpm), external | crank sensor / power meter fed by the host | engine core, live only | none (value between two crank events) |
 
 ## Algorithms
 
@@ -476,8 +536,8 @@ configuration stored in the journal header, not the one the app passes later.
 
 ### `createSession` flags
 
-`adaptiveSampling` (false), `batterySaver` (false), `stepsEnabled` (false), `initialSteps` (0), `notificationTitle` /
-`notificationText`, `presenter`, `presenterTimeout` (5 s).
+`adaptiveSampling` (false), `batterySaver` (false), `stepsEnabled` (false), `initialSteps` (0), `pedalCadence` (false),
+`notificationTitle` / `notificationText`, `presenter`, `presenterTimeout` (5 s).
 
 ### Hard-coded constants (no config field; changing one means editing the core AND the Dart twin plus a fixture)
 
@@ -605,7 +665,7 @@ a restore, call the presenter's restore path so it reuses an activity that survi
 `pendingPdrMeters` (not part of the total), `segmentId`, `fixCount`, `speedMps`, `lastFixAt`, `activeTime`, `movingTime`,
 `elapsedTime`, `bridgedGap`, `uncreditedGap`, `uncreditedGaps`, `isStopped`, `steps`, `strideMeters`, `stepsStatus`,
 `stepsFinal`, `ambiguousSteps`, `distanceEligibleSteps`, `journalPending`, `journalFailed`, `isDurable`, `restoreState`,
-`engineChanged`, `recoveredGap`, `clockAnomaly`, `collection` (`collecting` / `notCollecting` / `blocked`), `failureState`,
+`pedalCadenceRpm`, `cadenceSource`, `cadenceStatus`, `engineChanged`, `recoveredGap`, `clockAnomaly`, `collection` (`collecting` / `notCollecting` / `blocked`), `failureState`,
 `error`.
 
 ## Limits and tests
@@ -620,6 +680,8 @@ a restore, call the presenter's restore path so it reuses an activity that survi
 - The sampling plan's `highAccuracy` is not applied natively (Android always HIGH_ACCURACY, iOS always best), so
   `batterySaver` only changes interval and displacement.
 - A step batch delivered long after its interval cannot be attached to a gap that was already credited.
+- Pedal cadence from the accelerometer is a live estimate, not validated on a real bike and dependent on the phone being on the leg.
+- External cadence is untested with a real sensor, and only exists while the host keeps feeding it: there is no Bluetooth code in the package.
 - A watch producer is designed for (same events, same core) but not built.
 
 **Tests recorded for beta.2** (from `CHANGELOG.md`; not re-run when this README was written): 197 core (JVM,

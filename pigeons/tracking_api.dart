@@ -59,6 +59,31 @@ enum NativeStepsStatus {
   failed,
 }
 
+/// Whether the native accelerometer is feeding the pedal-cadence estimator.
+enum NativeMotionStatus {
+  /// Not requested (`StartConfig.pedalCadence` is false) or not started yet.
+  off,
+  active,
+
+  /// The device has no accelerometer.
+  unavailable,
+
+  /// The sensor reported a runtime error (see `NativeSnapshot.error`).
+  failed,
+}
+
+/// Where [NativeSnapshot.pedalCadenceRpm] came from.
+enum NativeCadenceSource {
+  /// No value.
+  none,
+
+  /// The phone accelerometer estimate.
+  phone,
+
+  /// A sensor outside the phone, fed by the host (see `pushCscMeasurement` / `pushExternalCadence`).
+  externalSensor,
+}
+
 /// What a restore found in the session's journal.
 enum NativeRestoreState {
   /// The snapshot was not produced by a restore.
@@ -213,7 +238,12 @@ class StartConfig {
     required this.initialSteps,
     required this.recoverRunning,
     required this.maxRecoverGapMs,
+    required this.pedalCadence,
   });
+
+  /// Estimate the pedalling cadence (rpm) from the accelerometer of a phone carried on the leg (pocket, thigh). Live
+  /// only: it is not journaled and has no effect on distance. See `NativeSnapshot.pedalCadenceRpm`.
+  bool pedalCadence;
 
   /// Restore only: continue a session that was RECORDING when its process died, crediting the calendar time that
   /// passed (see `SessionRecorder.recoverAfterProcessDeath`). False restores it paused at its last event.
@@ -365,6 +395,9 @@ class NativeSnapshot {
     required this.recoveredGapMs,
     required this.clockAnomaly,
     required this.collection,
+    required this.pedalCadenceRpm,
+    required this.cadenceStatus,
+    required this.cadenceSource,
     this.sessionId,
     this.lastFixTimeMs,
     this.error,
@@ -402,6 +435,17 @@ class NativeSnapshot {
   /// Whether native is actually collecting location now, separate from what the person asked for: a recovered
   /// session can have its clock back while collection is blocked (permission, foreground service refused).
   NativeCollection collection;
+
+  /// Pedalling cadence in revolutions per minute from the best source ([cadenceSource]): a healthy external sensor
+  /// (0 = the cranks are still), else the phone accelerometer estimate; NEGATIVE = unknown (no source, warming up, no
+  /// clear rhythm). Not available after a restore until a new window has been seen.
+  double pedalCadenceRpm;
+
+  /// Which source [pedalCadenceRpm] came from.
+  NativeCadenceSource cadenceSource;
+
+  /// State of the native accelerometer feeding [pedalCadenceRpm].
+  NativeMotionStatus cadenceStatus;
 
   /// True when the step total is final: after `stop`, the platform's exact count
   /// for the closed segment was obtained (or there is no step sensor). False
@@ -477,6 +521,17 @@ abstract class TrackingHostApi {
   /// Written when a session starts, removed when it finishes or is cleared.
   @async
   String? activeSessionId();
+
+  /// A raw Bluetooth CSC Measurement (0x2A5B) from a sensor the HOST app connected to. The SDK never scans, pairs or
+  /// reconnects. [connectionId] is bumped by the host for every new connection to the device; a notification of an older
+  /// one, of a closed one, or of another session is dropped. Live only: not journaled, no effect on distance.
+  void pushCscMeasurement(String sessionId, String sourceId, int connectionId, Uint8List data);
+
+  /// A cadence already in rpm from a source that is not CSC (a power meter). 0 is a measurement (cranks still).
+  void pushExternalCadence(String sessionId, String sourceId, int connectionId, double rpm);
+
+  /// The host connected to, or lost, the external sensor. Losing it makes the cadence fall back to the phone at once.
+  void setExternalCadenceConnected(String sessionId, String sourceId, int connectionId, bool connected);
 
   /// Coordinate-free timeline of what the native engine decided.
   String getReport();

@@ -17,6 +17,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import tracker.algorithms.cadence.CadenceChoice
+import tracker.algorithms.cadence.CadenceSource
+import tracker.algorithms.cadence.ExternalCadenceHub
+import tracker.algorithms.motion.PedalCadenceEstimator
 import tracker.bridge.BridgePlan
 import tracker.bridge.BridgeSnapshot
 import tracker.journal.BridgeSettings
@@ -62,6 +66,7 @@ internal class TrackingEngine(
     private val store: JournalStore,
     private val scope: CoroutineScope,
     private val stepSource: StepSource = NoStepSource,
+    private val accelerometerSource: AccelerometerSource = NoAccelerometerSource,
     private val wallClockMs: () -> Long = System::currentTimeMillis,
     private val monotonicMs: () -> Long = SystemClock::elapsedRealtime,
 ) {
@@ -91,6 +96,7 @@ internal class TrackingEngine(
     @Volatile private var lastFixTimeMs: Long? = null
     @Volatile private var lastError: String? = null
     @Volatile private var stepsStatus = NativeStepsStatus.OFF
+    @Volatile private var cadenceStatus = NativeMotionStatus.OFF
     @Volatile private var extras: Map<String, String> = emptyMap()
     @Volatile private var restoreState = NativeRestoreState.NOT_RESTORED
     @Volatile private var engineChanged = false
@@ -101,6 +107,12 @@ internal class TrackingEngine(
     private var collector: Job? = null
     private var ticker: Job? = null
     private var stepJob: Job? = null
+    private var cadenceJob: Job? = null
+    private var pedalCadence = false
+
+    /** Live only (never journaled, no effect on distance). Touched under [coreLock]. */
+    private val cadence = PedalCadenceEstimator()
+    private val externalCadence = ExternalCadenceHub()
     private var adaptive = false
     private var stepsEnabled = false
     private var request: Request? = null
@@ -121,8 +133,16 @@ internal class TrackingEngine(
     fun snapshot(): NativeSnapshot {
         val failure = sink?.failure
         val error = lastError ?: failure?.let { "${TrackingErrorCode.STORE_WRITE_FAILED}: ${it.message ?: "I/O error"}" }
+        val choice = resolveCadence()
         return NativeSnapshot(
             stepsStatus = stepsStatus,
+            pedalCadenceRpm = choice.rpm,
+            cadenceSource = when (choice.source) {
+                CadenceSource.PHONE -> NativeCadenceSource.PHONE
+                CadenceSource.EXTERNAL -> NativeCadenceSource.EXTERNAL_SENSOR
+                CadenceSource.NONE -> NativeCadenceSource.NONE
+            },
+            cadenceStatus = cadenceStatus,
             stepsFinal = state == NativeTrackingState.STOPPED && (restoredStepsFinal ?: true),
             journalPending = (sink?.pending ?: 0).toLong(),
             journalFailed = failure != null,
@@ -158,6 +178,7 @@ internal class TrackingEngine(
             "title" to config.notificationTitle, "text" to config.notificationText,
             "intervalMs" to config.intervalMs.toString(), "minDistanceMeters" to config.minDistanceMeters.toString(),
             "stepsEnabled" to config.stepsEnabled.toString(),
+            "pedalCadence" to config.pedalCadence.toString(),
             // Kept in the journal so a recovery without Flutter (the service) knows the limit the app chose.
             "maxRecoverGapMs" to config.maxRecoverGapMs.toString(),
         )
@@ -182,11 +203,14 @@ internal class TrackingEngine(
             restoredStepsFinal = null
             adaptive = config.adaptiveSampling
             stepsEnabled = config.stepsEnabled
+            pedalCadence = config.pedalCadence
+            externalCadence.reset()
             request = Request(config.intervalMs, config.minDistanceMeters.toFloat())
             state = NativeTrackingState.RUNNING
         }
         beginCollecting()
         beginSteps()
+        beginCadence()
         publish()
         snapshot()
     }
@@ -216,6 +240,7 @@ internal class TrackingEngine(
             }
             beginCollecting()
             beginSteps()
+            beginCadence()
             publish()
         }
         snapshot()
@@ -262,6 +287,38 @@ internal class TrackingEngine(
         withCoreIf(generation, id) { it.submitPdr(segment, monotonicMs(), meters) }
         publish()
     }
+
+    /**
+     * The cadence to show: a healthy external sensor (fed by the host) else the phone estimate, only while recording.
+     * Live only: never journaled, no effect on distance.
+     */
+    private fun resolveCadence(): CadenceChoice = synchronized(coreLock) {
+        if (state != NativeTrackingState.RUNNING) return@synchronized CadenceChoice(PedalCadenceEstimator.UNKNOWN, CadenceSource.NONE)
+        val now = monotonicMs()
+        val phone = if (pedalCadence && cadenceStatus == NativeMotionStatus.ACTIVE) cadence.rpm(now) else PedalCadenceEstimator.UNKNOWN
+        externalCadence.resolve(phone, now)
+    }
+
+    /** External cadence input (a connection state, a raw CSC notification, a ready rpm): only for the open session. */
+    private fun withExternalCadence(id: String, block: (ExternalCadenceHub, Long) -> Unit) {
+        synchronized(coreLock) {
+            if (id != sessionId || (state != NativeTrackingState.RUNNING && state != NativeTrackingState.PAUSED)) return
+            try {
+                block(externalCadence, monotonicMs())
+            } catch (e: Exception) { // bad input from outside must never touch the recording
+                Log.e(LOG_TAG, "external cadence input refused", e)
+            }
+        }
+    }
+
+    fun pushCsc(id: String, sourceId: String, connectionId: Long, bytes: ByteArray) =
+        withExternalCadence(id) { hub, now -> hub.onCsc(sourceId, connectionId, bytes, now) }
+
+    fun pushExternalRpm(id: String, sourceId: String, connectionId: Long, rpm: Double) =
+        withExternalCadence(id) { hub, now -> hub.onRpm(sourceId, connectionId, rpm, now) }
+
+    fun setExternalConnected(id: String, sourceId: String, connectionId: Long, connected: Boolean) =
+        withExternalCadence(id) { hub, _ -> hub.onConnection(sourceId, connectionId, connected) }
 
     /** Coordinate-free timeline of the core's decisions. */
     fun report(): String = synchronized(coreLock) { recorder?.report() } ?: ""
@@ -334,6 +391,9 @@ internal class TrackingEngine(
             adaptive = settingsAdaptive(usable)
             stepsEnabled = result.extras["stepsEnabled"] == "true"
             stepsStatus = NativeStepsStatus.OFF
+            pedalCadence = result.extras["pedalCadence"] == "true"
+            cadenceStatus = NativeMotionStatus.OFF
+            externalCadence.reset()
             val interval = result.extras["intervalMs"]?.toLongOrNull() ?: defaultIntervalMs
             val minDistance = result.extras["minDistanceMeters"]?.toFloatOrNull() ?: defaultMinDistanceMeters.toFloat()
             request = Request(interval, minDistance)
@@ -372,6 +432,7 @@ internal class TrackingEngine(
         if (state == NativeTrackingState.RUNNING) {
             beginCollecting()
             beginSteps()
+            beginCadence()
         }
         publish()
         return snapshot()
@@ -428,9 +489,13 @@ internal class TrackingEngine(
         collector?.cancelAndJoin()
         ticker?.cancelAndJoin()
         stepJob?.cancelAndJoin()
+        cadenceJob?.cancelAndJoin()
         collector = null
         ticker = null
         stepJob = null
+        cadenceJob = null
+        // `ACTIVE` means the sensor is collecting: it is not any more. A failure keeps its status (it says why).
+        if (cadenceStatus == NativeMotionStatus.ACTIVE) cadenceStatus = NativeMotionStatus.OFF
         reconfiguring = false
     }
 
@@ -492,6 +557,45 @@ internal class TrackingEngine(
                     }
                     publish()
                 }
+        }
+    }
+
+    /**
+     * Registers the accelerometer for the open segment when the pedal cadence was asked for. A missing or failing
+     * sensor never stops the recording: it only sets [cadenceStatus]. The estimator starts empty on every segment, so
+     * the paused interval is never read as a rhythm. Live only: nothing here is journaled.
+     */
+    private fun beginCadence() {
+        synchronized(coreLock) { cadence.reset() }
+        if (!pedalCadence) {
+            cadenceStatus = NativeMotionStatus.OFF
+            return
+        }
+        val status = accelerometerSource.status()
+        cadenceStatus = status
+        if (status != NativeMotionStatus.ACTIVE) return
+        val gen = generation
+        cadenceJob = scope.launch {
+            // One try around the whole collect: `Flow.catch` does not see an exception thrown by the collector itself.
+            try {
+                accelerometerSource.samples().collect { sample ->
+                    synchronized(coreLock) {
+                        if (gen != generation || state != NativeTrackingState.RUNNING) return@synchronized
+                        cadence.push(sample.elapsedMs, sample.x, sample.y, sample.z)
+                    }
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                Log.e(LOG_TAG, "accelerometer failed", error)
+                synchronized(coreLock) {
+                    if (gen != generation) return@synchronized
+                    cadence.reset()
+                    cadenceStatus = NativeMotionStatus.FAILED
+                    lastError = "${TrackingErrorCode.CADENCE_FAILED}: ${error.message ?: error::class.java.simpleName}"
+                }
+                publish()
+            }
         }
     }
 

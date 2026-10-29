@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter_tracking_gps/src/engine/gps_distance_engine.dart';
 import 'package:flutter_tracking_gps/src/domain/tracking_config.dart';
 import 'package:flutter_tracking_gps/src/domain/tracking_fix.dart';
@@ -28,6 +29,12 @@ class FakePlatform implements TrackingPlatform {
   Future<PlatformPermission> permissionStatus() async =>
       PlatformPermission.granted;
   @override
+  Future<void> pushCscMeasurement(String sessionId, String sourceId, int connectionId, Uint8List data) async {}
+  @override
+  Future<void> pushExternalCadence(String sessionId, String sourceId, int connectionId, double rpm) async {}
+  @override
+  Future<void> setExternalCadenceConnected(String sessionId, String sourceId, int connectionId, bool connected) async {}
+  @override
   Future<PlatformSnapshot> start({
     required String sessionId,
     required int startSeq,
@@ -41,6 +48,7 @@ class FakePlatform implements TrackingPlatform {
     required String notificationText,
     required bool stepsEnabled,
     required int initialSteps,
+    bool pedalCadence = false,
   }) async => snap();
   @override
   Future<PlatformSnapshot> pause(String sessionId) async =>

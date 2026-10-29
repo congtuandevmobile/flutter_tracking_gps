@@ -136,6 +136,27 @@ enum NativeStepsStatus {
   failed,
 }
 
+/// Whether the native accelerometer is feeding the pedal-cadence estimator.
+enum NativeMotionStatus {
+  /// Not requested (`StartConfig.pedalCadence` is false) or not started yet.
+  off,
+  active,
+  /// The device has no accelerometer.
+  unavailable,
+  /// The sensor reported a runtime error (see `NativeSnapshot.error`).
+  failed,
+}
+
+/// Where [NativeSnapshot.pedalCadenceRpm] came from.
+enum NativeCadenceSource {
+  /// No value.
+  none,
+  /// The phone accelerometer estimate.
+  phone,
+  /// A sensor outside the phone, fed by the host (see `pushCscMeasurement` / `pushExternalCadence`).
+  externalSensor,
+}
+
 /// What a restore found in the session's journal.
 enum NativeRestoreState {
   /// The snapshot was not produced by a restore.
@@ -430,6 +451,7 @@ class EngineConfig {
 
 class StartConfig {
   StartConfig({
+    required this.pedalCadence,
     required this.recoverRunning,
     required this.maxRecoverGapMs,
     required this.stepsEnabled,
@@ -445,6 +467,10 @@ class StartConfig {
     required this.notificationTitle,
     required this.notificationText,
   });
+
+  /// Estimate the pedalling cadence (rpm) from the accelerometer of a phone carried on the leg (pocket, thigh). Live
+  /// only: it is not journaled and has no effect on distance. See `NativeSnapshot.pedalCadenceRpm`.
+  bool pedalCadence;
 
   /// Restore only: continue a session that was RECORDING when its process died, crediting the calendar time that
   /// passed (see `SessionRecorder.recoverAfterProcessDeath`). False restores it paused at its last event.
@@ -499,6 +525,7 @@ class StartConfig {
 
   List<Object?> _toList() {
     return <Object?>[
+      pedalCadence,
       recoverRunning,
       maxRecoverGapMs,
       stepsEnabled,
@@ -522,20 +549,21 @@ class StartConfig {
   static StartConfig decode(Object result) {
     result as List<Object?>;
     return StartConfig(
-      recoverRunning: result[0]! as bool,
-      maxRecoverGapMs: result[1]! as int,
-      stepsEnabled: result[2]! as bool,
-      initialSteps: result[3]! as int,
-      engine: result[4]! as EngineConfig,
-      adaptiveSampling: result[5]! as bool,
-      batterySaver: result[6]! as bool,
-      sessionId: result[7]! as String,
-      startSeq: result[8]! as int,
-      startSegmentId: result[9]! as int,
-      intervalMs: result[10]! as int,
-      minDistanceMeters: result[11]! as double,
-      notificationTitle: result[12]! as String,
-      notificationText: result[13]! as String,
+      pedalCadence: result[0]! as bool,
+      recoverRunning: result[1]! as bool,
+      maxRecoverGapMs: result[2]! as int,
+      stepsEnabled: result[3]! as bool,
+      initialSteps: result[4]! as int,
+      engine: result[5]! as EngineConfig,
+      adaptiveSampling: result[6]! as bool,
+      batterySaver: result[7]! as bool,
+      sessionId: result[8]! as String,
+      startSeq: result[9]! as int,
+      startSegmentId: result[10]! as int,
+      intervalMs: result[11]! as int,
+      minDistanceMeters: result[12]! as double,
+      notificationTitle: result[13]! as String,
+      notificationText: result[14]! as String,
     );
   }
 
@@ -548,7 +576,7 @@ class StartConfig {
     if (identical(this, other)) {
       return true;
     }
-    return _deepEquals(recoverRunning, other.recoverRunning) && _deepEquals(maxRecoverGapMs, other.maxRecoverGapMs) && _deepEquals(stepsEnabled, other.stepsEnabled) && _deepEquals(initialSteps, other.initialSteps) && _deepEquals(engine, other.engine) && _deepEquals(adaptiveSampling, other.adaptiveSampling) && _deepEquals(batterySaver, other.batterySaver) && _deepEquals(sessionId, other.sessionId) && _deepEquals(startSeq, other.startSeq) && _deepEquals(startSegmentId, other.startSegmentId) && _deepEquals(intervalMs, other.intervalMs) && _deepEquals(minDistanceMeters, other.minDistanceMeters) && _deepEquals(notificationTitle, other.notificationTitle) && _deepEquals(notificationText, other.notificationText);
+    return _deepEquals(pedalCadence, other.pedalCadence) && _deepEquals(recoverRunning, other.recoverRunning) && _deepEquals(maxRecoverGapMs, other.maxRecoverGapMs) && _deepEquals(stepsEnabled, other.stepsEnabled) && _deepEquals(initialSteps, other.initialSteps) && _deepEquals(engine, other.engine) && _deepEquals(adaptiveSampling, other.adaptiveSampling) && _deepEquals(batterySaver, other.batterySaver) && _deepEquals(sessionId, other.sessionId) && _deepEquals(startSeq, other.startSeq) && _deepEquals(startSegmentId, other.startSegmentId) && _deepEquals(intervalMs, other.intervalMs) && _deepEquals(minDistanceMeters, other.minDistanceMeters) && _deepEquals(notificationTitle, other.notificationTitle) && _deepEquals(notificationText, other.notificationText);
   }
 
   @override
@@ -709,6 +737,9 @@ class NativeSnapshot {
     required this.recoveredGapMs,
     required this.clockAnomaly,
     required this.collection,
+    required this.pedalCadenceRpm,
+    required this.cadenceSource,
+    required this.cadenceStatus,
     required this.stepsFinal,
     this.sessionId,
     required this.state,
@@ -753,6 +784,17 @@ class NativeSnapshot {
   /// session can have its clock back while collection is blocked (permission, foreground service refused).
   NativeCollection collection;
 
+  /// Pedalling cadence in revolutions per minute from the best source ([cadenceSource]): a healthy external sensor
+  /// (0 = the cranks are still), else the phone accelerometer estimate; NEGATIVE = unknown (no source, warming up, no
+  /// clear rhythm). Not available after a restore until a new window has been seen.
+  double pedalCadenceRpm;
+
+  /// Which source [pedalCadenceRpm] came from.
+  NativeCadenceSource cadenceSource;
+
+  /// State of the native accelerometer feeding [pedalCadenceRpm].
+  NativeMotionStatus cadenceStatus;
+
   /// True when the step total is final: after `stop`, the platform's exact count
   /// for the closed segment was obtained (or there is no step sensor). False
   /// means the total is the live count, which may still be corrected.
@@ -787,6 +829,9 @@ class NativeSnapshot {
       recoveredGapMs,
       clockAnomaly,
       collection,
+      pedalCadenceRpm,
+      cadenceSource,
+      cadenceStatus,
       stepsFinal,
       sessionId,
       state,
@@ -814,15 +859,18 @@ class NativeSnapshot {
       recoveredGapMs: result[6]! as int,
       clockAnomaly: result[7]! as bool,
       collection: result[8]! as NativeCollection,
-      stepsFinal: result[9]! as bool,
-      sessionId: result[10] as String?,
-      state: result[11]! as NativeTrackingState,
-      segmentId: result[12]! as int,
-      distance: result[13]! as NativeDistance,
-      fixCount: result[14]! as int,
-      lastFixTimeMs: result[15] as int?,
-      updatedAtMs: result[16]! as int,
-      error: result[17] as String?,
+      pedalCadenceRpm: result[9]! as double,
+      cadenceSource: result[10]! as NativeCadenceSource,
+      cadenceStatus: result[11]! as NativeMotionStatus,
+      stepsFinal: result[12]! as bool,
+      sessionId: result[13] as String?,
+      state: result[14]! as NativeTrackingState,
+      segmentId: result[15]! as int,
+      distance: result[16]! as NativeDistance,
+      fixCount: result[17]! as int,
+      lastFixTimeMs: result[18] as int?,
+      updatedAtMs: result[19]! as int,
+      error: result[20] as String?,
     );
   }
 
@@ -835,7 +883,7 @@ class NativeSnapshot {
     if (identical(this, other)) {
       return true;
     }
-    return _deepEquals(stepsStatus, other.stepsStatus) && _deepEquals(restoreState, other.restoreState) && _deepEquals(engineChanged, other.engineChanged) && _deepEquals(journalPending, other.journalPending) && _deepEquals(journalFailed, other.journalFailed) && _deepEquals(elapsedTimeMs, other.elapsedTimeMs) && _deepEquals(recoveredGapMs, other.recoveredGapMs) && _deepEquals(clockAnomaly, other.clockAnomaly) && _deepEquals(collection, other.collection) && _deepEquals(stepsFinal, other.stepsFinal) && _deepEquals(sessionId, other.sessionId) && _deepEquals(state, other.state) && _deepEquals(segmentId, other.segmentId) && _deepEquals(distance, other.distance) && _deepEquals(fixCount, other.fixCount) && _deepEquals(lastFixTimeMs, other.lastFixTimeMs) && _deepEquals(updatedAtMs, other.updatedAtMs) && _deepEquals(error, other.error);
+    return _deepEquals(stepsStatus, other.stepsStatus) && _deepEquals(restoreState, other.restoreState) && _deepEquals(engineChanged, other.engineChanged) && _deepEquals(journalPending, other.journalPending) && _deepEquals(journalFailed, other.journalFailed) && _deepEquals(elapsedTimeMs, other.elapsedTimeMs) && _deepEquals(recoveredGapMs, other.recoveredGapMs) && _deepEquals(clockAnomaly, other.clockAnomaly) && _deepEquals(collection, other.collection) && _deepEquals(pedalCadenceRpm, other.pedalCadenceRpm) && _deepEquals(cadenceSource, other.cadenceSource) && _deepEquals(cadenceStatus, other.cadenceStatus) && _deepEquals(stepsFinal, other.stepsFinal) && _deepEquals(sessionId, other.sessionId) && _deepEquals(state, other.state) && _deepEquals(segmentId, other.segmentId) && _deepEquals(distance, other.distance) && _deepEquals(fixCount, other.fixCount) && _deepEquals(lastFixTimeMs, other.lastFixTimeMs) && _deepEquals(updatedAtMs, other.updatedAtMs) && _deepEquals(error, other.error);
   }
 
   @override
@@ -860,29 +908,35 @@ class _PigeonCodec extends StandardMessageCodec {
     }    else if (value is NativeStepsStatus) {
       buffer.putUint8(131);
       writeValue(buffer, value.index);
-    }    else if (value is NativeRestoreState) {
+    }    else if (value is NativeMotionStatus) {
       buffer.putUint8(132);
       writeValue(buffer, value.index);
-    }    else if (value is NativeGpsQuality) {
+    }    else if (value is NativeCadenceSource) {
       buffer.putUint8(133);
       writeValue(buffer, value.index);
-    }    else if (value is NativeCollection) {
+    }    else if (value is NativeRestoreState) {
       buffer.putUint8(134);
       writeValue(buffer, value.index);
-    }    else if (value is NativeFix) {
+    }    else if (value is NativeGpsQuality) {
       buffer.putUint8(135);
-      writeValue(buffer, value.encode());
-    }    else if (value is EngineConfig) {
+      writeValue(buffer, value.index);
+    }    else if (value is NativeCollection) {
       buffer.putUint8(136);
-      writeValue(buffer, value.encode());
-    }    else if (value is StartConfig) {
+      writeValue(buffer, value.index);
+    }    else if (value is NativeFix) {
       buffer.putUint8(137);
       writeValue(buffer, value.encode());
-    }    else if (value is NativeDistance) {
+    }    else if (value is EngineConfig) {
       buffer.putUint8(138);
       writeValue(buffer, value.encode());
-    }    else if (value is NativeSnapshot) {
+    }    else if (value is StartConfig) {
       buffer.putUint8(139);
+      writeValue(buffer, value.encode());
+    }    else if (value is NativeDistance) {
+      buffer.putUint8(140);
+      writeValue(buffer, value.encode());
+    }    else if (value is NativeSnapshot) {
+      buffer.putUint8(141);
       writeValue(buffer, value.encode());
     } else {
       super.writeValue(buffer, value);
@@ -903,22 +957,28 @@ class _PigeonCodec extends StandardMessageCodec {
         return value == null ? null : NativeStepsStatus.values[value];
       case 132:
         final value = readValue(buffer) as int?;
-        return value == null ? null : NativeRestoreState.values[value];
+        return value == null ? null : NativeMotionStatus.values[value];
       case 133:
         final value = readValue(buffer) as int?;
-        return value == null ? null : NativeGpsQuality.values[value];
+        return value == null ? null : NativeCadenceSource.values[value];
       case 134:
         final value = readValue(buffer) as int?;
-        return value == null ? null : NativeCollection.values[value];
+        return value == null ? null : NativeRestoreState.values[value];
       case 135:
-        return NativeFix.decode(readValue(buffer)!);
+        final value = readValue(buffer) as int?;
+        return value == null ? null : NativeGpsQuality.values[value];
       case 136:
-        return EngineConfig.decode(readValue(buffer)!);
+        final value = readValue(buffer) as int?;
+        return value == null ? null : NativeCollection.values[value];
       case 137:
-        return StartConfig.decode(readValue(buffer)!);
+        return NativeFix.decode(readValue(buffer)!);
       case 138:
-        return NativeDistance.decode(readValue(buffer)!);
+        return EngineConfig.decode(readValue(buffer)!);
       case 139:
+        return StartConfig.decode(readValue(buffer)!);
+      case 140:
+        return NativeDistance.decode(readValue(buffer)!);
+      case 141:
         return NativeSnapshot.decode(readValue(buffer)!);
       default:
         return super.readValueOfType(type, buffer);
@@ -1188,6 +1248,65 @@ class TrackingHostApi {
     )
     ;
     return pigeonVar_replyValue as String?;
+  }
+
+  /// A raw Bluetooth CSC Measurement (0x2A5B) from a sensor the HOST app connected to. The SDK never scans, pairs or
+  /// reconnects. [connectionId] is bumped by the host for every new connection to the device; a notification of an older
+  /// one, of a closed one, or of another session is dropped. Live only: not journaled, no effect on distance.
+  Future<void> pushCscMeasurement(String sessionId, String sourceId, int connectionId, Uint8List data) async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.flutter_tracking_gps.TrackingHostApi.pushCscMeasurement$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[sessionId, sourceId, connectionId, data]);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+
+    _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: true,
+    )
+    ;
+  }
+
+  /// A cadence already in rpm from a source that is not CSC (a power meter). 0 is a measurement (cranks still).
+  Future<void> pushExternalCadence(String sessionId, String sourceId, int connectionId, double rpm) async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.flutter_tracking_gps.TrackingHostApi.pushExternalCadence$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[sessionId, sourceId, connectionId, rpm]);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+
+    _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: true,
+    )
+    ;
+  }
+
+  /// The host connected to, or lost, the external sensor. Losing it makes the cadence fall back to the phone at once.
+  Future<void> setExternalCadenceConnected(String sessionId, String sourceId, int connectionId, bool connected) async {
+    final pigeonVar_channelName = 'dev.flutter.pigeon.flutter_tracking_gps.TrackingHostApi.setExternalCadenceConnected$pigeonVar_messageChannelSuffix';
+    final pigeonVar_channel = BasicMessageChannel<Object?>(
+      pigeonVar_channelName,
+      pigeonChannelCodec,
+      binaryMessenger: pigeonVar_binaryMessenger,
+    );
+    final Future<Object?> pigeonVar_sendFuture = pigeonVar_channel.send(<Object?>[sessionId, sourceId, connectionId, connected]);
+    final pigeonVar_replyList = await pigeonVar_sendFuture as List<Object?>?;
+
+    _extractReplyValueOrThrow(
+        pigeonVar_replyList,
+        pigeonVar_channelName,
+        isNullValid: true,
+    )
+    ;
   }
 
   /// Coordinate-free timeline of what the native engine decided.

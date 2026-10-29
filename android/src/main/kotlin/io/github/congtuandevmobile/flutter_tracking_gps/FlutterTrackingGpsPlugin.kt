@@ -292,6 +292,9 @@ class FlutterTrackingGpsPlugin :
             recoveredGapMs = 0,
             clockAnomaly = false,
             collection = NativeCollection.NOT_COLLECTING,
+            pedalCadenceRpm = -1.0,
+            cadenceStatus = NativeMotionStatus.OFF,
+            cadenceSource = NativeCadenceSource.NONE,
         )
         return TrackingRuntime.engine(context).snapshot()
     }
@@ -299,6 +302,21 @@ class FlutterTrackingGpsPlugin :
     override fun submitPdr(sessionId: String, segmentId: Long, meters: Double) {
         val context = appContext ?: return
         TrackingRuntime.engine(context).submitPdr(sessionId, segmentId.toInt(), meters)
+    }
+
+    override fun pushCscMeasurement(sessionId: String, sourceId: String, connectionId: Long, data: ByteArray) {
+        val context = appContext ?: return
+        TrackingRuntime.engine(context).pushCsc(sessionId, sourceId, connectionId, data)
+    }
+
+    override fun pushExternalCadence(sessionId: String, sourceId: String, connectionId: Long, rpm: Double) {
+        val context = appContext ?: return
+        TrackingRuntime.engine(context).pushExternalRpm(sessionId, sourceId, connectionId, rpm)
+    }
+
+    override fun setExternalCadenceConnected(sessionId: String, sourceId: String, connectionId: Long, connected: Boolean) {
+        val context = appContext ?: return
+        TrackingRuntime.engine(context).setExternalConnected(sessionId, sourceId, connectionId, connected)
     }
 
     override fun restoreSession(config: StartConfig, callback: (Result<NativeSnapshot>) -> Unit) {

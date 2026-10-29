@@ -213,6 +213,27 @@ enum NativeStepsStatus: Int {
   case failed = 4
 }
 
+/// Whether the native accelerometer is feeding the pedal-cadence estimator.
+enum NativeMotionStatus: Int {
+  /// Not requested (`StartConfig.pedalCadence` is false) or not started yet.
+  case off = 0
+  case active = 1
+  /// The device has no accelerometer.
+  case unavailable = 2
+  /// The sensor reported a runtime error (see `NativeSnapshot.error`).
+  case failed = 3
+}
+
+/// Where [NativeSnapshot.pedalCadenceRpm] came from.
+enum NativeCadenceSource: Int {
+  /// No value.
+  case none = 0
+  /// The phone accelerometer estimate.
+  case phone = 1
+  /// A sensor outside the phone, fed by the host (see `pushCscMeasurement` / `pushExternalCadence`).
+  case externalSensor = 2
+}
+
 /// What a restore found in the session's journal.
 enum NativeRestoreState: Int {
   /// The snapshot was not produced by a restore.
@@ -491,6 +512,9 @@ struct EngineConfig: Hashable {
 
 /// Generated class from Pigeon that represents data sent in messages.
 struct StartConfig: Hashable {
+  /// Estimate the pedalling cadence (rpm) from the accelerometer of a phone carried on the leg (pocket, thigh). Live
+  /// only: it is not journaled and has no effect on distance. See `NativeSnapshot.pedalCadenceRpm`.
+  var pedalCadence: Bool
   /// Restore only: continue a session that was RECORDING when its process died, crediting the calendar time that
   /// passed (see `SessionRecorder.recoverAfterProcessDeath`). False restores it paused at its last event.
   var recoverRunning: Bool
@@ -532,22 +556,24 @@ struct StartConfig: Hashable {
 
   // swift-format-ignore: AlwaysUseLowerCamelCase
   static func fromList(_ pigeonVar_list: [Any?]) -> StartConfig? {
-    let recoverRunning = pigeonVar_list[0] as! Bool
-    let maxRecoverGapMs = pigeonVar_list[1] as! Int64
-    let stepsEnabled = pigeonVar_list[2] as! Bool
-    let initialSteps = pigeonVar_list[3] as! Int64
-    let engine = pigeonVar_list[4] as! EngineConfig
-    let adaptiveSampling = pigeonVar_list[5] as! Bool
-    let batterySaver = pigeonVar_list[6] as! Bool
-    let sessionId = pigeonVar_list[7] as! String
-    let startSeq = pigeonVar_list[8] as! Int64
-    let startSegmentId = pigeonVar_list[9] as! Int64
-    let intervalMs = pigeonVar_list[10] as! Int64
-    let minDistanceMeters = pigeonVar_list[11] as! Double
-    let notificationTitle = pigeonVar_list[12] as! String
-    let notificationText = pigeonVar_list[13] as! String
+    let pedalCadence = pigeonVar_list[0] as! Bool
+    let recoverRunning = pigeonVar_list[1] as! Bool
+    let maxRecoverGapMs = pigeonVar_list[2] as! Int64
+    let stepsEnabled = pigeonVar_list[3] as! Bool
+    let initialSteps = pigeonVar_list[4] as! Int64
+    let engine = pigeonVar_list[5] as! EngineConfig
+    let adaptiveSampling = pigeonVar_list[6] as! Bool
+    let batterySaver = pigeonVar_list[7] as! Bool
+    let sessionId = pigeonVar_list[8] as! String
+    let startSeq = pigeonVar_list[9] as! Int64
+    let startSegmentId = pigeonVar_list[10] as! Int64
+    let intervalMs = pigeonVar_list[11] as! Int64
+    let minDistanceMeters = pigeonVar_list[12] as! Double
+    let notificationTitle = pigeonVar_list[13] as! String
+    let notificationText = pigeonVar_list[14] as! String
 
     return StartConfig(
+      pedalCadence: pedalCadence,
       recoverRunning: recoverRunning,
       maxRecoverGapMs: maxRecoverGapMs,
       stepsEnabled: stepsEnabled,
@@ -566,6 +592,7 @@ struct StartConfig: Hashable {
   }
   func toList() -> [Any?] {
     return [
+      pedalCadence,
       recoverRunning,
       maxRecoverGapMs,
       stepsEnabled,
@@ -586,11 +613,12 @@ struct StartConfig: Hashable {
     if Swift.type(of: lhs) != Swift.type(of: rhs) {
       return false
     }
-    return deepEqualsTrackingApi(lhs.recoverRunning, rhs.recoverRunning) && deepEqualsTrackingApi(lhs.maxRecoverGapMs, rhs.maxRecoverGapMs) && deepEqualsTrackingApi(lhs.stepsEnabled, rhs.stepsEnabled) && deepEqualsTrackingApi(lhs.initialSteps, rhs.initialSteps) && deepEqualsTrackingApi(lhs.engine, rhs.engine) && deepEqualsTrackingApi(lhs.adaptiveSampling, rhs.adaptiveSampling) && deepEqualsTrackingApi(lhs.batterySaver, rhs.batterySaver) && deepEqualsTrackingApi(lhs.sessionId, rhs.sessionId) && deepEqualsTrackingApi(lhs.startSeq, rhs.startSeq) && deepEqualsTrackingApi(lhs.startSegmentId, rhs.startSegmentId) && deepEqualsTrackingApi(lhs.intervalMs, rhs.intervalMs) && deepEqualsTrackingApi(lhs.minDistanceMeters, rhs.minDistanceMeters) && deepEqualsTrackingApi(lhs.notificationTitle, rhs.notificationTitle) && deepEqualsTrackingApi(lhs.notificationText, rhs.notificationText)
+    return deepEqualsTrackingApi(lhs.pedalCadence, rhs.pedalCadence) && deepEqualsTrackingApi(lhs.recoverRunning, rhs.recoverRunning) && deepEqualsTrackingApi(lhs.maxRecoverGapMs, rhs.maxRecoverGapMs) && deepEqualsTrackingApi(lhs.stepsEnabled, rhs.stepsEnabled) && deepEqualsTrackingApi(lhs.initialSteps, rhs.initialSteps) && deepEqualsTrackingApi(lhs.engine, rhs.engine) && deepEqualsTrackingApi(lhs.adaptiveSampling, rhs.adaptiveSampling) && deepEqualsTrackingApi(lhs.batterySaver, rhs.batterySaver) && deepEqualsTrackingApi(lhs.sessionId, rhs.sessionId) && deepEqualsTrackingApi(lhs.startSeq, rhs.startSeq) && deepEqualsTrackingApi(lhs.startSegmentId, rhs.startSegmentId) && deepEqualsTrackingApi(lhs.intervalMs, rhs.intervalMs) && deepEqualsTrackingApi(lhs.minDistanceMeters, rhs.minDistanceMeters) && deepEqualsTrackingApi(lhs.notificationTitle, rhs.notificationTitle) && deepEqualsTrackingApi(lhs.notificationText, rhs.notificationText)
   }
 
   func hash(into hasher: inout Hasher) {
     hasher.combine("StartConfig")
+    deepHashTrackingApi(value: pedalCadence, hasher: &hasher)
     deepHashTrackingApi(value: recoverRunning, hasher: &hasher)
     deepHashTrackingApi(value: maxRecoverGapMs, hasher: &hasher)
     deepHashTrackingApi(value: stepsEnabled, hasher: &hasher)
@@ -768,6 +796,14 @@ struct NativeSnapshot: Hashable {
   /// Whether native is actually collecting location now, separate from what the person asked for: a recovered
   /// session can have its clock back while collection is blocked (permission, foreground service refused).
   var collection: NativeCollection
+  /// Pedalling cadence in revolutions per minute from the best source ([cadenceSource]): a healthy external sensor
+  /// (0 = the cranks are still), else the phone accelerometer estimate; NEGATIVE = unknown (no source, warming up, no
+  /// clear rhythm). Not available after a restore until a new window has been seen.
+  var pedalCadenceRpm: Double
+  /// Which source [pedalCadenceRpm] came from.
+  var cadenceSource: NativeCadenceSource
+  /// State of the native accelerometer feeding [pedalCadenceRpm].
+  var cadenceStatus: NativeMotionStatus
   /// True when the step total is final: after `stop`, the platform's exact count
   /// for the closed segment was obtained (or there is no step sensor). False
   /// means the total is the live count, which may still be corrected.
@@ -795,15 +831,18 @@ struct NativeSnapshot: Hashable {
     let recoveredGapMs = pigeonVar_list[6] as! Int64
     let clockAnomaly = pigeonVar_list[7] as! Bool
     let collection = pigeonVar_list[8] as! NativeCollection
-    let stepsFinal = pigeonVar_list[9] as! Bool
-    let sessionId: String? = nilOrValue(pigeonVar_list[10])
-    let state = pigeonVar_list[11] as! NativeTrackingState
-    let segmentId = pigeonVar_list[12] as! Int64
-    let distance = pigeonVar_list[13] as! NativeDistance
-    let fixCount = pigeonVar_list[14] as! Int64
-    let lastFixTimeMs: Int64? = nilOrValue(pigeonVar_list[15])
-    let updatedAtMs = pigeonVar_list[16] as! Int64
-    let error: String? = nilOrValue(pigeonVar_list[17])
+    let pedalCadenceRpm = pigeonVar_list[9] as! Double
+    let cadenceSource = pigeonVar_list[10] as! NativeCadenceSource
+    let cadenceStatus = pigeonVar_list[11] as! NativeMotionStatus
+    let stepsFinal = pigeonVar_list[12] as! Bool
+    let sessionId: String? = nilOrValue(pigeonVar_list[13])
+    let state = pigeonVar_list[14] as! NativeTrackingState
+    let segmentId = pigeonVar_list[15] as! Int64
+    let distance = pigeonVar_list[16] as! NativeDistance
+    let fixCount = pigeonVar_list[17] as! Int64
+    let lastFixTimeMs: Int64? = nilOrValue(pigeonVar_list[18])
+    let updatedAtMs = pigeonVar_list[19] as! Int64
+    let error: String? = nilOrValue(pigeonVar_list[20])
 
     return NativeSnapshot(
       stepsStatus: stepsStatus,
@@ -815,6 +854,9 @@ struct NativeSnapshot: Hashable {
       recoveredGapMs: recoveredGapMs,
       clockAnomaly: clockAnomaly,
       collection: collection,
+      pedalCadenceRpm: pedalCadenceRpm,
+      cadenceSource: cadenceSource,
+      cadenceStatus: cadenceStatus,
       stepsFinal: stepsFinal,
       sessionId: sessionId,
       state: state,
@@ -837,6 +879,9 @@ struct NativeSnapshot: Hashable {
       recoveredGapMs,
       clockAnomaly,
       collection,
+      pedalCadenceRpm,
+      cadenceSource,
+      cadenceStatus,
       stepsFinal,
       sessionId,
       state,
@@ -852,7 +897,7 @@ struct NativeSnapshot: Hashable {
     if Swift.type(of: lhs) != Swift.type(of: rhs) {
       return false
     }
-    return deepEqualsTrackingApi(lhs.stepsStatus, rhs.stepsStatus) && deepEqualsTrackingApi(lhs.restoreState, rhs.restoreState) && deepEqualsTrackingApi(lhs.engineChanged, rhs.engineChanged) && deepEqualsTrackingApi(lhs.journalPending, rhs.journalPending) && deepEqualsTrackingApi(lhs.journalFailed, rhs.journalFailed) && deepEqualsTrackingApi(lhs.elapsedTimeMs, rhs.elapsedTimeMs) && deepEqualsTrackingApi(lhs.recoveredGapMs, rhs.recoveredGapMs) && deepEqualsTrackingApi(lhs.clockAnomaly, rhs.clockAnomaly) && deepEqualsTrackingApi(lhs.collection, rhs.collection) && deepEqualsTrackingApi(lhs.stepsFinal, rhs.stepsFinal) && deepEqualsTrackingApi(lhs.sessionId, rhs.sessionId) && deepEqualsTrackingApi(lhs.state, rhs.state) && deepEqualsTrackingApi(lhs.segmentId, rhs.segmentId) && deepEqualsTrackingApi(lhs.distance, rhs.distance) && deepEqualsTrackingApi(lhs.fixCount, rhs.fixCount) && deepEqualsTrackingApi(lhs.lastFixTimeMs, rhs.lastFixTimeMs) && deepEqualsTrackingApi(lhs.updatedAtMs, rhs.updatedAtMs) && deepEqualsTrackingApi(lhs.error, rhs.error)
+    return deepEqualsTrackingApi(lhs.stepsStatus, rhs.stepsStatus) && deepEqualsTrackingApi(lhs.restoreState, rhs.restoreState) && deepEqualsTrackingApi(lhs.engineChanged, rhs.engineChanged) && deepEqualsTrackingApi(lhs.journalPending, rhs.journalPending) && deepEqualsTrackingApi(lhs.journalFailed, rhs.journalFailed) && deepEqualsTrackingApi(lhs.elapsedTimeMs, rhs.elapsedTimeMs) && deepEqualsTrackingApi(lhs.recoveredGapMs, rhs.recoveredGapMs) && deepEqualsTrackingApi(lhs.clockAnomaly, rhs.clockAnomaly) && deepEqualsTrackingApi(lhs.collection, rhs.collection) && deepEqualsTrackingApi(lhs.pedalCadenceRpm, rhs.pedalCadenceRpm) && deepEqualsTrackingApi(lhs.cadenceSource, rhs.cadenceSource) && deepEqualsTrackingApi(lhs.cadenceStatus, rhs.cadenceStatus) && deepEqualsTrackingApi(lhs.stepsFinal, rhs.stepsFinal) && deepEqualsTrackingApi(lhs.sessionId, rhs.sessionId) && deepEqualsTrackingApi(lhs.state, rhs.state) && deepEqualsTrackingApi(lhs.segmentId, rhs.segmentId) && deepEqualsTrackingApi(lhs.distance, rhs.distance) && deepEqualsTrackingApi(lhs.fixCount, rhs.fixCount) && deepEqualsTrackingApi(lhs.lastFixTimeMs, rhs.lastFixTimeMs) && deepEqualsTrackingApi(lhs.updatedAtMs, rhs.updatedAtMs) && deepEqualsTrackingApi(lhs.error, rhs.error)
   }
 
   func hash(into hasher: inout Hasher) {
@@ -866,6 +911,9 @@ struct NativeSnapshot: Hashable {
     deepHashTrackingApi(value: recoveredGapMs, hasher: &hasher)
     deepHashTrackingApi(value: clockAnomaly, hasher: &hasher)
     deepHashTrackingApi(value: collection, hasher: &hasher)
+    deepHashTrackingApi(value: pedalCadenceRpm, hasher: &hasher)
+    deepHashTrackingApi(value: cadenceSource, hasher: &hasher)
+    deepHashTrackingApi(value: cadenceStatus, hasher: &hasher)
     deepHashTrackingApi(value: stepsFinal, hasher: &hasher)
     deepHashTrackingApi(value: sessionId, hasher: &hasher)
     deepHashTrackingApi(value: state, hasher: &hasher)
@@ -902,30 +950,42 @@ private class TrackingApiPigeonCodecReader: FlutterStandardReader {
     case 132:
       let enumResultAsInt: Int? = nilOrValue(self.readValue() as! Int?)
       if let enumResultAsInt = enumResultAsInt {
-        return NativeRestoreState(rawValue: enumResultAsInt)
+        return NativeMotionStatus(rawValue: enumResultAsInt)
       }
       return nil
     case 133:
       let enumResultAsInt: Int? = nilOrValue(self.readValue() as! Int?)
       if let enumResultAsInt = enumResultAsInt {
-        return NativeGpsQuality(rawValue: enumResultAsInt)
+        return NativeCadenceSource(rawValue: enumResultAsInt)
       }
       return nil
     case 134:
       let enumResultAsInt: Int? = nilOrValue(self.readValue() as! Int?)
       if let enumResultAsInt = enumResultAsInt {
-        return NativeCollection(rawValue: enumResultAsInt)
+        return NativeRestoreState(rawValue: enumResultAsInt)
       }
       return nil
     case 135:
-      return NativeFix.fromList(self.readValue() as! [Any?])
+      let enumResultAsInt: Int? = nilOrValue(self.readValue() as! Int?)
+      if let enumResultAsInt = enumResultAsInt {
+        return NativeGpsQuality(rawValue: enumResultAsInt)
+      }
+      return nil
     case 136:
-      return EngineConfig.fromList(self.readValue() as! [Any?])
+      let enumResultAsInt: Int? = nilOrValue(self.readValue() as! Int?)
+      if let enumResultAsInt = enumResultAsInt {
+        return NativeCollection(rawValue: enumResultAsInt)
+      }
+      return nil
     case 137:
-      return StartConfig.fromList(self.readValue() as! [Any?])
+      return NativeFix.fromList(self.readValue() as! [Any?])
     case 138:
-      return NativeDistance.fromList(self.readValue() as! [Any?])
+      return EngineConfig.fromList(self.readValue() as! [Any?])
     case 139:
+      return StartConfig.fromList(self.readValue() as! [Any?])
+    case 140:
+      return NativeDistance.fromList(self.readValue() as! [Any?])
+    case 141:
       return NativeSnapshot.fromList(self.readValue() as! [Any?])
     default:
       return super.readValue(ofType: type)
@@ -944,29 +1004,35 @@ private class TrackingApiPigeonCodecWriter: FlutterStandardWriter {
     } else if let value = value as? NativeStepsStatus {
       super.writeByte(131)
       super.writeValue(value.rawValue)
-    } else if let value = value as? NativeRestoreState {
+    } else if let value = value as? NativeMotionStatus {
       super.writeByte(132)
       super.writeValue(value.rawValue)
-    } else if let value = value as? NativeGpsQuality {
+    } else if let value = value as? NativeCadenceSource {
       super.writeByte(133)
       super.writeValue(value.rawValue)
-    } else if let value = value as? NativeCollection {
+    } else if let value = value as? NativeRestoreState {
       super.writeByte(134)
       super.writeValue(value.rawValue)
-    } else if let value = value as? NativeFix {
+    } else if let value = value as? NativeGpsQuality {
       super.writeByte(135)
-      super.writeValue(value.toList())
-    } else if let value = value as? EngineConfig {
+      super.writeValue(value.rawValue)
+    } else if let value = value as? NativeCollection {
       super.writeByte(136)
-      super.writeValue(value.toList())
-    } else if let value = value as? StartConfig {
+      super.writeValue(value.rawValue)
+    } else if let value = value as? NativeFix {
       super.writeByte(137)
       super.writeValue(value.toList())
-    } else if let value = value as? NativeDistance {
+    } else if let value = value as? EngineConfig {
       super.writeByte(138)
       super.writeValue(value.toList())
-    } else if let value = value as? NativeSnapshot {
+    } else if let value = value as? StartConfig {
       super.writeByte(139)
+      super.writeValue(value.toList())
+    } else if let value = value as? NativeDistance {
+      super.writeByte(140)
+      super.writeValue(value.toList())
+    } else if let value = value as? NativeSnapshot {
+      super.writeByte(141)
       super.writeValue(value.toList())
     } else {
       super.writeValue(value)
@@ -1027,6 +1093,14 @@ protocol TrackingHostApi {
   /// The id of the session that was recording or paused when it was last seen (the open-session pointer), or null.
   /// Written when a session starts, removed when it finishes or is cleared.
   func activeSessionId(completion: @escaping (Result<String?, Error>) -> Void)
+  /// A raw Bluetooth CSC Measurement (0x2A5B) from a sensor the HOST app connected to. The SDK never scans, pairs or
+  /// reconnects. [connectionId] is bumped by the host for every new connection to the device; a notification of an older
+  /// one, of a closed one, or of another session is dropped. Live only: not journaled, no effect on distance.
+  func pushCscMeasurement(sessionId: String, sourceId: String, connectionId: Int64, data: FlutterStandardTypedData) throws
+  /// A cadence already in rpm from a source that is not CSC (a power meter). 0 is a measurement (cranks still).
+  func pushExternalCadence(sessionId: String, sourceId: String, connectionId: Int64, rpm: Double) throws
+  /// The host connected to, or lost, the external sensor. Losing it makes the cadence fall back to the phone at once.
+  func setExternalCadenceConnected(sessionId: String, sourceId: String, connectionId: Int64, connected: Bool) throws
   /// Coordinate-free timeline of what the native engine decided.
   func getReport() throws -> String
   /// Persisted fixes of [sessionId] with `seq > afterSeq`, oldest first.
@@ -1258,6 +1332,65 @@ class TrackingHostApiSetup {
       }
     } else {
       activeSessionIdChannel.setMessageHandler(nil)
+    }
+    /// A raw Bluetooth CSC Measurement (0x2A5B) from a sensor the HOST app connected to. The SDK never scans, pairs or
+    /// reconnects. [connectionId] is bumped by the host for every new connection to the device; a notification of an older
+    /// one, of a closed one, or of another session is dropped. Live only: not journaled, no effect on distance.
+    let pushCscMeasurementChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.flutter_tracking_gps.TrackingHostApi.pushCscMeasurement\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      pushCscMeasurementChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let sessionIdArg = args[0] as! String
+        let sourceIdArg = args[1] as! String
+        let connectionIdArg = args[2] as! Int64
+        let dataArg = args[3] as! FlutterStandardTypedData
+        do {
+          try api.pushCscMeasurement(sessionId: sessionIdArg, sourceId: sourceIdArg, connectionId: connectionIdArg, data: dataArg)
+          reply(wrapResult(nil))
+        } catch {
+          reply(wrapError(error))
+        }
+      }
+    } else {
+      pushCscMeasurementChannel.setMessageHandler(nil)
+    }
+    /// A cadence already in rpm from a source that is not CSC (a power meter). 0 is a measurement (cranks still).
+    let pushExternalCadenceChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.flutter_tracking_gps.TrackingHostApi.pushExternalCadence\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      pushExternalCadenceChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let sessionIdArg = args[0] as! String
+        let sourceIdArg = args[1] as! String
+        let connectionIdArg = args[2] as! Int64
+        let rpmArg = args[3] as! Double
+        do {
+          try api.pushExternalCadence(sessionId: sessionIdArg, sourceId: sourceIdArg, connectionId: connectionIdArg, rpm: rpmArg)
+          reply(wrapResult(nil))
+        } catch {
+          reply(wrapError(error))
+        }
+      }
+    } else {
+      pushExternalCadenceChannel.setMessageHandler(nil)
+    }
+    /// The host connected to, or lost, the external sensor. Losing it makes the cadence fall back to the phone at once.
+    let setExternalCadenceConnectedChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.flutter_tracking_gps.TrackingHostApi.setExternalCadenceConnected\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)
+    if let api = api {
+      setExternalCadenceConnectedChannel.setMessageHandler { message, reply in
+        let args = message as! [Any?]
+        let sessionIdArg = args[0] as! String
+        let sourceIdArg = args[1] as! String
+        let connectionIdArg = args[2] as! Int64
+        let connectedArg = args[3] as! Bool
+        do {
+          try api.setExternalCadenceConnected(sessionId: sessionIdArg, sourceId: sourceIdArg, connectionId: connectionIdArg, connected: connectedArg)
+          reply(wrapResult(nil))
+        } catch {
+          reply(wrapError(error))
+        }
+      }
+    } else {
+      setExternalCadenceConnectedChannel.setMessageHandler(nil)
     }
     /// Coordinate-free timeline of what the native engine decided.
     let getReportChannel = FlutterBasicMessageChannel(name: "dev.flutter.pigeon.flutter_tracking_gps.TrackingHostApi.getReport\(channelSuffix)", binaryMessenger: binaryMessenger, codec: codec)

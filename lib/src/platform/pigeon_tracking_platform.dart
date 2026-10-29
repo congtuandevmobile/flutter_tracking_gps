@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:flutter_tracking_gps/src/domain/tracking_config.dart';
 import 'package:flutter_tracking_gps/src/domain/tracking_fix.dart';
 import 'package:flutter_tracking_gps/src/domain/tracking_state.dart';
@@ -58,6 +60,7 @@ class PigeonTrackingPlatform implements TrackingPlatform {
     required String notificationText,
     required bool stepsEnabled,
     required int initialSteps,
+    bool pedalCadence = false,
   }) async => _snapshot(
     await _api.start(
       _startConfig(
@@ -73,6 +76,7 @@ class PigeonTrackingPlatform implements TrackingPlatform {
         notificationText: notificationText,
         stepsEnabled: stepsEnabled,
         initialSteps: initialSteps,
+        pedalCadence: pedalCadence,
       ),
     ),
   );
@@ -117,6 +121,18 @@ class PigeonTrackingPlatform implements TrackingPlatform {
   @override
   Future<void> submitPdr(String sessionId, int segmentId, double meters) async =>
       _api.submitPdr(sessionId, segmentId, meters);
+
+  @override
+  Future<void> pushCscMeasurement(String sessionId, String sourceId, int connectionId, Uint8List data) =>
+      _api.pushCscMeasurement(sessionId, sourceId, connectionId, data);
+
+  @override
+  Future<void> pushExternalCadence(String sessionId, String sourceId, int connectionId, double rpm) =>
+      _api.pushExternalCadence(sessionId, sourceId, connectionId, rpm);
+
+  @override
+  Future<void> setExternalCadenceConnected(String sessionId, String sourceId, int connectionId, bool connected) =>
+      _api.setExternalCadenceConnected(sessionId, sourceId, connectionId, connected);
 
   @override
   Future<String> report() async => _api.getReport();
@@ -184,6 +200,7 @@ class PigeonTrackingPlatform implements TrackingPlatform {
     required String notificationText,
     required bool stepsEnabled,
     required int initialSteps,
+    bool pedalCadence = false,
     bool recoverRunning = false,
     bool inheritRecoverGap = false,
   }) => StartConfig(
@@ -202,6 +219,7 @@ class PigeonTrackingPlatform implements TrackingPlatform {
     batterySaver: batterySaver,
     stepsEnabled: stepsEnabled,
     initialSteps: initialSteps,
+    pedalCadence: pedalCadence,
     engine: EngineConfig(
       maxAccuracyMeters: config.maxAccuracyMeters,
       maxFixAgeMs: config.maxFixAge.inMilliseconds,
@@ -274,6 +292,18 @@ class PigeonTrackingPlatform implements TrackingPlatform {
       NativeCollection.collecting => CollectionState.collecting,
       NativeCollection.notCollecting => CollectionState.notCollecting,
       NativeCollection.blocked => CollectionState.blocked,
+    },
+    pedalCadenceRpm: _known(s.pedalCadenceRpm),
+    cadenceStatus: switch (s.cadenceStatus) {
+      NativeMotionStatus.off => PedalCadenceStatus.off,
+      NativeMotionStatus.active => PedalCadenceStatus.active,
+      NativeMotionStatus.unavailable => PedalCadenceStatus.unavailable,
+      NativeMotionStatus.failed => PedalCadenceStatus.failed,
+    },
+    cadenceSource: switch (s.cadenceSource) {
+      NativeCadenceSource.none => CadenceSource.none,
+      NativeCadenceSource.phone => CadenceSource.phone,
+      NativeCadenceSource.externalSensor => CadenceSource.externalSensor,
     },
     error: s.error,
   );

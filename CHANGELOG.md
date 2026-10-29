@@ -1,5 +1,40 @@
 ## v0.0.1-beta.2
 
+**External cadence sensor (fed by the host).** Not tested with a real sensor or on a physical device. The package still has no Bluetooth
+code or permission: the host connects and pushes the data.
+
+* New on `TrackingSession`: `setExternalCadenceConnected`, `pushCscMeasurement` (raw Bluetooth CSC Measurement, 0x2A5B) and
+  `pushExternalCadence` (an rpm from another source, such as a power meter). `TrackingSnapshot.cadenceSource` (`CadenceSource`:
+  `none`, `phone`, `externalSensor`) says where `pedalCadenceRpm` came from; 0 is a valid external value (cranks still), unknown stays null.
+* Core (`tracker.algorithms.cadence`): `CscCadenceParser` (full CSC layout, wheel-only/truncated packets, 16-bit rollover of the counter and
+  of the event clock, new baseline after 60 s without a revolution, a counter jump or a clock that goes back, stopped = valid
+  notifications with an unchanged counter, silence = unknown), `CadenceResolver` (external over phone over none, health by connection and
+  freshness, recovery hysteresis), `ExternalCadenceHub` (source identity `(sourceId, connectionId)`, stale connections dropped).
+* Android and iOS: the engine holds one hub, ignores input for another session or a finished one, takes the receipt time on arrival and
+  shows the external cadence only while recording. No change to the journal, the distance or the engine version.
+* Pigeon contract: `pushCscMeasurement`, `pushExternalCadence`, `setExternalCadenceConnected`, enum `NativeCadenceSource`,
+  `NativeSnapshot.cadenceSource`. `PlatformSnapshot` has a new optional `cadenceSource`; `TrackingPlatform` has three new methods
+  (implementers must add them).
+* Hardening of the phone cadence: `cadenceStatus` goes back to `off` when the sensor stops (pause), and the Android collector no longer
+  lets an exception from the estimator escape. Tests: 255 core, 72 Android, 59 iOS, 95 Dart.
+
+
+**Pedal cadence from the accelerometer.** Not tested on a bike or a physical device. Tests: 209 core, 65 Android, 54 iOS, 93 Dart.
+
+* New `createSession(pedalCadence: true)` (also on `attachOrRecover`): estimates the pedalling cadence in rpm from the accelerometer of a phone
+  carried on the leg. Published as `TrackingSnapshot.pedalCadenceRpm` (`double?`, null = unknown) and `cadenceStatus` (`PedalCadenceStatus`).
+  No permission is needed.
+* Live only: nothing is journaled, distance is untouched, the journal format and the engine version do not change. The flag is stored in the
+  journal header `extras` so a recovered recording turns it back on; the value is null again until a new window has been seen.
+* Core: `PedalCadenceEstimator` (`tracking-core`): bins, axis of greatest variance, autocorrelation 30 to 130 rpm, sub-harmonic guard,
+  parabolic interpolation, smoothing. Every number is an unmeasured starting value.
+* Android: `AccelerometerSource` (`TYPE_ACCELEROMETER`, about 50 Hz on a private thread, bounded buffer that drops the oldest). iOS:
+  `MotionProviding` / `CoreMotionAccelerometerProvider` (`CMMotionManager`, 50 Hz). New error code `CADENCE_FAILED`.
+* Pigeon contract: `StartConfig.pedalCadence`, `NativeSnapshot.pedalCadenceRpm`, `NativeSnapshot.cadenceStatus`, enum `NativeMotionStatus`.
+  `TrackingPlatform.start` has a new optional `pedalCadence` argument (implementers must accept it).
+
+## v0.0.1-beta.2
+
 **Process-death recovery.** Not tested on a physical device. Tests: 197 core, 60 Android, 48 iOS, 92 Dart.
 
 * **A recording survives its process dying.** A session that was recording when the process died comes back

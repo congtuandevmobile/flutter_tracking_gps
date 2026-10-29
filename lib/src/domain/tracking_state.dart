@@ -60,6 +60,31 @@ enum StepsStatus {
   failed,
 }
 
+/// State of the native accelerometer feeding the pedal-cadence estimate.
+enum PedalCadenceStatus {
+  /// Not requested (`pedalCadence` is false) or not started yet.
+  off,
+  active,
+
+  /// The device has no accelerometer.
+  unavailable,
+
+  /// The sensor reported a runtime error (see `TrackingSnapshot.error`).
+  failed,
+}
+
+/// Where `TrackingSnapshot.pedalCadenceRpm` came from.
+enum CadenceSource {
+  /// No value.
+  none,
+
+  /// The phone accelerometer estimate (phone on the leg).
+  phone,
+
+  /// A sensor outside the phone that the host app feeds (a crank cadence sensor, a power meter).
+  externalSensor,
+}
+
 enum GpsQuality {
   /// Nothing known yet (just started / resumed).
   unknown,

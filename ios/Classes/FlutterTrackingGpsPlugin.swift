@@ -81,6 +81,18 @@ public class FlutterTrackingGpsPlugin: NSObject, FlutterPlugin, TrackingHostApi 
         FlutterTrackingGpsPlugin.engine.submitPdr(sessionId: sessionId, segmentId: segmentId, meters: meters)
     }
 
+    func pushCscMeasurement(sessionId: String, sourceId: String, connectionId: Int64, data: FlutterStandardTypedData) throws {
+        FlutterTrackingGpsPlugin.engine.pushCsc(sessionId: sessionId, sourceId: sourceId, connectionId: connectionId, data: data.data)
+    }
+
+    func pushExternalCadence(sessionId: String, sourceId: String, connectionId: Int64, rpm: Double) throws {
+        FlutterTrackingGpsPlugin.engine.pushExternalRpm(sessionId: sessionId, sourceId: sourceId, connectionId: connectionId, rpm: rpm)
+    }
+
+    func setExternalCadenceConnected(sessionId: String, sourceId: String, connectionId: Int64, connected: Bool) throws {
+        FlutterTrackingGpsPlugin.engine.setExternalConnected(sessionId: sessionId, sourceId: sourceId, connectionId: connectionId, connected: connected)
+    }
+
     func restoreSession(config: StartConfig, completion: @escaping (Result<NativeSnapshot, Error>) -> Void) {
         FlutterTrackingGpsPlugin.engine.restore(config: config, completion: completion)
     }

@@ -1,12 +1,16 @@
 name: Release flutter_tracking_gps
 
-# A normal push to main does NOT release. Only a push whose (latest) commit message contains
-# [release:flutter_tracking_gps] does, or a manual run. Same rule as the GitLab packages repo:
-#   branch == default branch && commit message =~ /[release:<package>]/
+# A normal push does NOT release. Only a push whose (latest) commit message contains
+# [release:flutter_tracking_gps] does, or a manual run, on main or on a feature/* branch.
+#   - main: any version (pub.dev + git tag + GitHub Release).
+#   - feature/*: git tag + GitHub pre-release ONLY, nothing goes to pub.dev. The pubspec.yaml version must be a
+#     pre-release (contains "-", e.g. 1.2.0-beta.1), so a test tag can never take a stable version number.
+#     Install it with a git dependency whose ref is the tag (a plain version number only resolves from pub.dev).
 on:
   push:
     branches:
       - main
+      - 'feature/**'
   workflow_dispatch:
 
 permissions:
@@ -86,6 +90,14 @@ jobs:
             echo "Detected Release version: $VERSION"
           fi
 
+      - name: Feature branches release pre-release versions only
+        if: github.ref != 'refs/heads/main'
+        run: |
+          if [ "${{ steps.version.outputs.is_prerelease }}" != "true" ]; then
+            echo "❌ ${{ github.ref_name }} is not main: pubspec version must be a pre-release (e.g. 1.2.0-beta.1)"
+            exit 1
+          fi
+
       - name: Check if tag exists
         run: |
           if git rev-parse "${{ steps.version.outputs.tag }}" >/dev/null 2>&1; then
@@ -131,6 +143,7 @@ jobs:
       # pub looks for its credentials in a per-OS folder: ~/.config/dart on Linux, but
       # ~/Library/Application Support/dart on macOS (this job runs on macOS). Write both.
       - name: Write pub credentials
+        if: github.ref == 'refs/heads/main'
         env:
           PUB_CREDENTIALS: ${{ secrets.PUB_CREDENTIALS }}
         run: |
@@ -144,6 +157,7 @@ jobs:
           done
 
       - name: Publish to pub.dev
+        if: github.ref == 'refs/heads/main'
         run: flutter pub publish --force
 
       - name: Configure git

@@ -253,6 +253,39 @@ enum class NativeStepsStatus(val raw: Int) {
   }
 }
 
+/** Whether the native accelerometer is feeding the pedal-cadence estimator. */
+enum class NativeMotionStatus(val raw: Int) {
+  /** Not requested (`StartConfig.pedalCadence` is false) or not started yet. */
+  OFF(0),
+  ACTIVE(1),
+  /** The device has no accelerometer. */
+  UNAVAILABLE(2),
+  /** The sensor reported a runtime error (see `NativeSnapshot.error`). */
+  FAILED(3);
+
+  companion object {
+    fun ofRaw(raw: Int): NativeMotionStatus? {
+      return values().firstOrNull { it.raw == raw }
+    }
+  }
+}
+
+/** Where [NativeSnapshot.pedalCadenceRpm] came from. */
+enum class NativeCadenceSource(val raw: Int) {
+  /** No value. */
+  NONE(0),
+  /** The phone accelerometer estimate. */
+  PHONE(1),
+  /** A sensor outside the phone, fed by the host (see `pushCscMeasurement` / `pushExternalCadence`). */
+  EXTERNAL_SENSOR(2);
+
+  companion object {
+    fun ofRaw(raw: Int): NativeCadenceSource? {
+      return values().firstOrNull { it.raw == raw }
+    }
+  }
+}
+
 /** What a restore found in the session's journal. */
 enum class NativeRestoreState(val raw: Int) {
   /** The snapshot was not produced by a restore. */
@@ -543,6 +576,11 @@ data class EngineConfig (
 /** Generated class from Pigeon that represents data sent in messages. */
 data class StartConfig (
   /**
+   * Estimate the pedalling cadence (rpm) from the accelerometer of a phone carried on the leg (pocket, thigh). Live
+   * only: it is not journaled and has no effect on distance. See `NativeSnapshot.pedalCadenceRpm`.
+   */
+  val pedalCadence: Boolean,
+  /**
    * Restore only: continue a session that was RECORDING when its process died, crediting the calendar time that
    * passed (see `SessionRecorder.recoverAfterProcessDeath`). False restores it paused at its last event.
    */
@@ -599,25 +637,27 @@ data class StartConfig (
  {
   companion object {
     fun fromList(pigeonVar_list: List<Any?>): StartConfig {
-      val recoverRunning = pigeonVar_list[0] as Boolean
-      val maxRecoverGapMs = pigeonVar_list[1] as Long
-      val stepsEnabled = pigeonVar_list[2] as Boolean
-      val initialSteps = pigeonVar_list[3] as Long
-      val engine = pigeonVar_list[4] as EngineConfig
-      val adaptiveSampling = pigeonVar_list[5] as Boolean
-      val batterySaver = pigeonVar_list[6] as Boolean
-      val sessionId = pigeonVar_list[7] as String
-      val startSeq = pigeonVar_list[8] as Long
-      val startSegmentId = pigeonVar_list[9] as Long
-      val intervalMs = pigeonVar_list[10] as Long
-      val minDistanceMeters = pigeonVar_list[11] as Double
-      val notificationTitle = pigeonVar_list[12] as String
-      val notificationText = pigeonVar_list[13] as String
-      return StartConfig(recoverRunning, maxRecoverGapMs, stepsEnabled, initialSteps, engine, adaptiveSampling, batterySaver, sessionId, startSeq, startSegmentId, intervalMs, minDistanceMeters, notificationTitle, notificationText)
+      val pedalCadence = pigeonVar_list[0] as Boolean
+      val recoverRunning = pigeonVar_list[1] as Boolean
+      val maxRecoverGapMs = pigeonVar_list[2] as Long
+      val stepsEnabled = pigeonVar_list[3] as Boolean
+      val initialSteps = pigeonVar_list[4] as Long
+      val engine = pigeonVar_list[5] as EngineConfig
+      val adaptiveSampling = pigeonVar_list[6] as Boolean
+      val batterySaver = pigeonVar_list[7] as Boolean
+      val sessionId = pigeonVar_list[8] as String
+      val startSeq = pigeonVar_list[9] as Long
+      val startSegmentId = pigeonVar_list[10] as Long
+      val intervalMs = pigeonVar_list[11] as Long
+      val minDistanceMeters = pigeonVar_list[12] as Double
+      val notificationTitle = pigeonVar_list[13] as String
+      val notificationText = pigeonVar_list[14] as String
+      return StartConfig(pedalCadence, recoverRunning, maxRecoverGapMs, stepsEnabled, initialSteps, engine, adaptiveSampling, batterySaver, sessionId, startSeq, startSegmentId, intervalMs, minDistanceMeters, notificationTitle, notificationText)
     }
   }
   fun toList(): List<Any?> {
     return listOf(
+      pedalCadence,
       recoverRunning,
       maxRecoverGapMs,
       stepsEnabled,
@@ -642,11 +682,12 @@ data class StartConfig (
       return true
     }
     val other = other as StartConfig
-    return TrackingApiPigeonUtils.deepEquals(this.recoverRunning, other.recoverRunning) && TrackingApiPigeonUtils.deepEquals(this.maxRecoverGapMs, other.maxRecoverGapMs) && TrackingApiPigeonUtils.deepEquals(this.stepsEnabled, other.stepsEnabled) && TrackingApiPigeonUtils.deepEquals(this.initialSteps, other.initialSteps) && TrackingApiPigeonUtils.deepEquals(this.engine, other.engine) && TrackingApiPigeonUtils.deepEquals(this.adaptiveSampling, other.adaptiveSampling) && TrackingApiPigeonUtils.deepEquals(this.batterySaver, other.batterySaver) && TrackingApiPigeonUtils.deepEquals(this.sessionId, other.sessionId) && TrackingApiPigeonUtils.deepEquals(this.startSeq, other.startSeq) && TrackingApiPigeonUtils.deepEquals(this.startSegmentId, other.startSegmentId) && TrackingApiPigeonUtils.deepEquals(this.intervalMs, other.intervalMs) && TrackingApiPigeonUtils.deepEquals(this.minDistanceMeters, other.minDistanceMeters) && TrackingApiPigeonUtils.deepEquals(this.notificationTitle, other.notificationTitle) && TrackingApiPigeonUtils.deepEquals(this.notificationText, other.notificationText)
+    return TrackingApiPigeonUtils.deepEquals(this.pedalCadence, other.pedalCadence) && TrackingApiPigeonUtils.deepEquals(this.recoverRunning, other.recoverRunning) && TrackingApiPigeonUtils.deepEquals(this.maxRecoverGapMs, other.maxRecoverGapMs) && TrackingApiPigeonUtils.deepEquals(this.stepsEnabled, other.stepsEnabled) && TrackingApiPigeonUtils.deepEquals(this.initialSteps, other.initialSteps) && TrackingApiPigeonUtils.deepEquals(this.engine, other.engine) && TrackingApiPigeonUtils.deepEquals(this.adaptiveSampling, other.adaptiveSampling) && TrackingApiPigeonUtils.deepEquals(this.batterySaver, other.batterySaver) && TrackingApiPigeonUtils.deepEquals(this.sessionId, other.sessionId) && TrackingApiPigeonUtils.deepEquals(this.startSeq, other.startSeq) && TrackingApiPigeonUtils.deepEquals(this.startSegmentId, other.startSegmentId) && TrackingApiPigeonUtils.deepEquals(this.intervalMs, other.intervalMs) && TrackingApiPigeonUtils.deepEquals(this.minDistanceMeters, other.minDistanceMeters) && TrackingApiPigeonUtils.deepEquals(this.notificationTitle, other.notificationTitle) && TrackingApiPigeonUtils.deepEquals(this.notificationText, other.notificationText)
   }
 
   override fun hashCode(): Int {
     var result = javaClass.hashCode()
+    result = 31 * result + TrackingApiPigeonUtils.deepHash(this.pedalCadence)
     result = 31 * result + TrackingApiPigeonUtils.deepHash(this.recoverRunning)
     result = 31 * result + TrackingApiPigeonUtils.deepHash(this.maxRecoverGapMs)
     result = 31 * result + TrackingApiPigeonUtils.deepHash(this.stepsEnabled)
@@ -830,6 +871,16 @@ data class NativeSnapshot (
    */
   val collection: NativeCollection,
   /**
+   * Pedalling cadence in revolutions per minute from the best source ([cadenceSource]): a healthy external sensor
+   * (0 = the cranks are still), else the phone accelerometer estimate; NEGATIVE = unknown (no source, warming up, no
+   * clear rhythm). Not available after a restore until a new window has been seen.
+   */
+  val pedalCadenceRpm: Double,
+  /** Which source [pedalCadenceRpm] came from. */
+  val cadenceSource: NativeCadenceSource,
+  /** State of the native accelerometer feeding [pedalCadenceRpm]. */
+  val cadenceStatus: NativeMotionStatus,
+  /**
    * True when the step total is final: after `stop`, the platform's exact count
    * for the closed segment was obtained (or there is no step sensor). False
    * means the total is the live count, which may still be corrected.
@@ -858,16 +909,19 @@ data class NativeSnapshot (
       val recoveredGapMs = pigeonVar_list[6] as Long
       val clockAnomaly = pigeonVar_list[7] as Boolean
       val collection = pigeonVar_list[8] as NativeCollection
-      val stepsFinal = pigeonVar_list[9] as Boolean
-      val sessionId = pigeonVar_list[10] as String?
-      val state = pigeonVar_list[11] as NativeTrackingState
-      val segmentId = pigeonVar_list[12] as Long
-      val distance = pigeonVar_list[13] as NativeDistance
-      val fixCount = pigeonVar_list[14] as Long
-      val lastFixTimeMs = pigeonVar_list[15] as Long?
-      val updatedAtMs = pigeonVar_list[16] as Long
-      val error = pigeonVar_list[17] as String?
-      return NativeSnapshot(stepsStatus, restoreState, engineChanged, journalPending, journalFailed, elapsedTimeMs, recoveredGapMs, clockAnomaly, collection, stepsFinal, sessionId, state, segmentId, distance, fixCount, lastFixTimeMs, updatedAtMs, error)
+      val pedalCadenceRpm = pigeonVar_list[9] as Double
+      val cadenceSource = pigeonVar_list[10] as NativeCadenceSource
+      val cadenceStatus = pigeonVar_list[11] as NativeMotionStatus
+      val stepsFinal = pigeonVar_list[12] as Boolean
+      val sessionId = pigeonVar_list[13] as String?
+      val state = pigeonVar_list[14] as NativeTrackingState
+      val segmentId = pigeonVar_list[15] as Long
+      val distance = pigeonVar_list[16] as NativeDistance
+      val fixCount = pigeonVar_list[17] as Long
+      val lastFixTimeMs = pigeonVar_list[18] as Long?
+      val updatedAtMs = pigeonVar_list[19] as Long
+      val error = pigeonVar_list[20] as String?
+      return NativeSnapshot(stepsStatus, restoreState, engineChanged, journalPending, journalFailed, elapsedTimeMs, recoveredGapMs, clockAnomaly, collection, pedalCadenceRpm, cadenceSource, cadenceStatus, stepsFinal, sessionId, state, segmentId, distance, fixCount, lastFixTimeMs, updatedAtMs, error)
     }
   }
   fun toList(): List<Any?> {
@@ -881,6 +935,9 @@ data class NativeSnapshot (
       recoveredGapMs,
       clockAnomaly,
       collection,
+      pedalCadenceRpm,
+      cadenceSource,
+      cadenceStatus,
       stepsFinal,
       sessionId,
       state,
@@ -900,7 +957,7 @@ data class NativeSnapshot (
       return true
     }
     val other = other as NativeSnapshot
-    return TrackingApiPigeonUtils.deepEquals(this.stepsStatus, other.stepsStatus) && TrackingApiPigeonUtils.deepEquals(this.restoreState, other.restoreState) && TrackingApiPigeonUtils.deepEquals(this.engineChanged, other.engineChanged) && TrackingApiPigeonUtils.deepEquals(this.journalPending, other.journalPending) && TrackingApiPigeonUtils.deepEquals(this.journalFailed, other.journalFailed) && TrackingApiPigeonUtils.deepEquals(this.elapsedTimeMs, other.elapsedTimeMs) && TrackingApiPigeonUtils.deepEquals(this.recoveredGapMs, other.recoveredGapMs) && TrackingApiPigeonUtils.deepEquals(this.clockAnomaly, other.clockAnomaly) && TrackingApiPigeonUtils.deepEquals(this.collection, other.collection) && TrackingApiPigeonUtils.deepEquals(this.stepsFinal, other.stepsFinal) && TrackingApiPigeonUtils.deepEquals(this.sessionId, other.sessionId) && TrackingApiPigeonUtils.deepEquals(this.state, other.state) && TrackingApiPigeonUtils.deepEquals(this.segmentId, other.segmentId) && TrackingApiPigeonUtils.deepEquals(this.distance, other.distance) && TrackingApiPigeonUtils.deepEquals(this.fixCount, other.fixCount) && TrackingApiPigeonUtils.deepEquals(this.lastFixTimeMs, other.lastFixTimeMs) && TrackingApiPigeonUtils.deepEquals(this.updatedAtMs, other.updatedAtMs) && TrackingApiPigeonUtils.deepEquals(this.error, other.error)
+    return TrackingApiPigeonUtils.deepEquals(this.stepsStatus, other.stepsStatus) && TrackingApiPigeonUtils.deepEquals(this.restoreState, other.restoreState) && TrackingApiPigeonUtils.deepEquals(this.engineChanged, other.engineChanged) && TrackingApiPigeonUtils.deepEquals(this.journalPending, other.journalPending) && TrackingApiPigeonUtils.deepEquals(this.journalFailed, other.journalFailed) && TrackingApiPigeonUtils.deepEquals(this.elapsedTimeMs, other.elapsedTimeMs) && TrackingApiPigeonUtils.deepEquals(this.recoveredGapMs, other.recoveredGapMs) && TrackingApiPigeonUtils.deepEquals(this.clockAnomaly, other.clockAnomaly) && TrackingApiPigeonUtils.deepEquals(this.collection, other.collection) && TrackingApiPigeonUtils.deepEquals(this.pedalCadenceRpm, other.pedalCadenceRpm) && TrackingApiPigeonUtils.deepEquals(this.cadenceSource, other.cadenceSource) && TrackingApiPigeonUtils.deepEquals(this.cadenceStatus, other.cadenceStatus) && TrackingApiPigeonUtils.deepEquals(this.stepsFinal, other.stepsFinal) && TrackingApiPigeonUtils.deepEquals(this.sessionId, other.sessionId) && TrackingApiPigeonUtils.deepEquals(this.state, other.state) && TrackingApiPigeonUtils.deepEquals(this.segmentId, other.segmentId) && TrackingApiPigeonUtils.deepEquals(this.distance, other.distance) && TrackingApiPigeonUtils.deepEquals(this.fixCount, other.fixCount) && TrackingApiPigeonUtils.deepEquals(this.lastFixTimeMs, other.lastFixTimeMs) && TrackingApiPigeonUtils.deepEquals(this.updatedAtMs, other.updatedAtMs) && TrackingApiPigeonUtils.deepEquals(this.error, other.error)
   }
 
   override fun hashCode(): Int {
@@ -914,6 +971,9 @@ data class NativeSnapshot (
     result = 31 * result + TrackingApiPigeonUtils.deepHash(this.recoveredGapMs)
     result = 31 * result + TrackingApiPigeonUtils.deepHash(this.clockAnomaly)
     result = 31 * result + TrackingApiPigeonUtils.deepHash(this.collection)
+    result = 31 * result + TrackingApiPigeonUtils.deepHash(this.pedalCadenceRpm)
+    result = 31 * result + TrackingApiPigeonUtils.deepHash(this.cadenceSource)
+    result = 31 * result + TrackingApiPigeonUtils.deepHash(this.cadenceStatus)
     result = 31 * result + TrackingApiPigeonUtils.deepHash(this.stepsFinal)
     result = 31 * result + TrackingApiPigeonUtils.deepHash(this.sessionId)
     result = 31 * result + TrackingApiPigeonUtils.deepHash(this.state)
@@ -946,40 +1006,50 @@ private open class TrackingApiPigeonCodec : StandardMessageCodec() {
       }
       132.toByte() -> {
         return (readValue(buffer) as Long?)?.let {
-          NativeRestoreState.ofRaw(it.toInt())
+          NativeMotionStatus.ofRaw(it.toInt())
         }
       }
       133.toByte() -> {
         return (readValue(buffer) as Long?)?.let {
-          NativeGpsQuality.ofRaw(it.toInt())
+          NativeCadenceSource.ofRaw(it.toInt())
         }
       }
       134.toByte() -> {
         return (readValue(buffer) as Long?)?.let {
-          NativeCollection.ofRaw(it.toInt())
+          NativeRestoreState.ofRaw(it.toInt())
         }
       }
       135.toByte() -> {
-        return (readValue(buffer) as? List<Any?>)?.let {
-          NativeFix.fromList(it)
+        return (readValue(buffer) as Long?)?.let {
+          NativeGpsQuality.ofRaw(it.toInt())
         }
       }
       136.toByte() -> {
-        return (readValue(buffer) as? List<Any?>)?.let {
-          EngineConfig.fromList(it)
+        return (readValue(buffer) as Long?)?.let {
+          NativeCollection.ofRaw(it.toInt())
         }
       }
       137.toByte() -> {
         return (readValue(buffer) as? List<Any?>)?.let {
-          StartConfig.fromList(it)
+          NativeFix.fromList(it)
         }
       }
       138.toByte() -> {
         return (readValue(buffer) as? List<Any?>)?.let {
-          NativeDistance.fromList(it)
+          EngineConfig.fromList(it)
         }
       }
       139.toByte() -> {
+        return (readValue(buffer) as? List<Any?>)?.let {
+          StartConfig.fromList(it)
+        }
+      }
+      140.toByte() -> {
+        return (readValue(buffer) as? List<Any?>)?.let {
+          NativeDistance.fromList(it)
+        }
+      }
+      141.toByte() -> {
         return (readValue(buffer) as? List<Any?>)?.let {
           NativeSnapshot.fromList(it)
         }
@@ -1001,36 +1071,44 @@ private open class TrackingApiPigeonCodec : StandardMessageCodec() {
         stream.write(131)
         writeValue(stream, value.raw.toLong())
       }
-      is NativeRestoreState -> {
+      is NativeMotionStatus -> {
         stream.write(132)
         writeValue(stream, value.raw.toLong())
       }
-      is NativeGpsQuality -> {
+      is NativeCadenceSource -> {
         stream.write(133)
         writeValue(stream, value.raw.toLong())
       }
-      is NativeCollection -> {
+      is NativeRestoreState -> {
         stream.write(134)
         writeValue(stream, value.raw.toLong())
       }
-      is NativeFix -> {
+      is NativeGpsQuality -> {
         stream.write(135)
-        writeValue(stream, value.toList())
+        writeValue(stream, value.raw.toLong())
       }
-      is EngineConfig -> {
+      is NativeCollection -> {
         stream.write(136)
-        writeValue(stream, value.toList())
+        writeValue(stream, value.raw.toLong())
       }
-      is StartConfig -> {
+      is NativeFix -> {
         stream.write(137)
         writeValue(stream, value.toList())
       }
-      is NativeDistance -> {
+      is EngineConfig -> {
         stream.write(138)
         writeValue(stream, value.toList())
       }
-      is NativeSnapshot -> {
+      is StartConfig -> {
         stream.write(139)
+        writeValue(stream, value.toList())
+      }
+      is NativeDistance -> {
+        stream.write(140)
+        writeValue(stream, value.toList())
+      }
+      is NativeSnapshot -> {
+        stream.write(141)
         writeValue(stream, value.toList())
       }
       else -> super.writeValue(stream, value)
@@ -1087,6 +1165,16 @@ interface TrackingHostApi {
    * Written when a session starts, removed when it finishes or is cleared.
    */
   fun activeSessionId(callback: (Result<String?>) -> Unit)
+  /**
+   * A raw Bluetooth CSC Measurement (0x2A5B) from a sensor the HOST app connected to. The SDK never scans, pairs or
+   * reconnects. [connectionId] is bumped by the host for every new connection to the device; a notification of an older
+   * one, of a closed one, or of another session is dropped. Live only: not journaled, no effect on distance.
+   */
+  fun pushCscMeasurement(sessionId: String, sourceId: String, connectionId: Long, data: ByteArray)
+  /** A cadence already in rpm from a source that is not CSC (a power meter). 0 is a measurement (cranks still). */
+  fun pushExternalCadence(sessionId: String, sourceId: String, connectionId: Long, rpm: Double)
+  /** The host connected to, or lost, the external sensor. Losing it makes the cadence fall back to the phone at once. */
+  fun setExternalCadenceConnected(sessionId: String, sourceId: String, connectionId: Long, connected: Boolean)
   /** Coordinate-free timeline of what the native engine decided. */
   fun getReport(): String
   /**
@@ -1333,6 +1421,69 @@ interface TrackingHostApi {
                 reply.reply(TrackingApiPigeonUtils.wrapResult(data))
               }
             }
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.flutter_tracking_gps.TrackingHostApi.pushCscMeasurement$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { message, reply ->
+            val args = message as List<Any?>
+            val sessionIdArg = args[0] as String
+            val sourceIdArg = args[1] as String
+            val connectionIdArg = args[2] as Long
+            val dataArg = args[3] as ByteArray
+            val wrapped: List<Any?> = try {
+              api.pushCscMeasurement(sessionIdArg, sourceIdArg, connectionIdArg, dataArg)
+              listOf(null)
+            } catch (exception: Throwable) {
+              TrackingApiPigeonUtils.wrapError(exception)
+            }
+            reply.reply(wrapped)
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.flutter_tracking_gps.TrackingHostApi.pushExternalCadence$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { message, reply ->
+            val args = message as List<Any?>
+            val sessionIdArg = args[0] as String
+            val sourceIdArg = args[1] as String
+            val connectionIdArg = args[2] as Long
+            val rpmArg = args[3] as Double
+            val wrapped: List<Any?> = try {
+              api.pushExternalCadence(sessionIdArg, sourceIdArg, connectionIdArg, rpmArg)
+              listOf(null)
+            } catch (exception: Throwable) {
+              TrackingApiPigeonUtils.wrapError(exception)
+            }
+            reply.reply(wrapped)
+          }
+        } else {
+          channel.setMessageHandler(null)
+        }
+      }
+      run {
+        val channel = BasicMessageChannel<Any?>(binaryMessenger, "dev.flutter.pigeon.flutter_tracking_gps.TrackingHostApi.setExternalCadenceConnected$separatedMessageChannelSuffix", codec)
+        if (api != null) {
+          channel.setMessageHandler { message, reply ->
+            val args = message as List<Any?>
+            val sessionIdArg = args[0] as String
+            val sourceIdArg = args[1] as String
+            val connectionIdArg = args[2] as Long
+            val connectedArg = args[3] as Boolean
+            val wrapped: List<Any?> = try {
+              api.setExternalCadenceConnected(sessionIdArg, sourceIdArg, connectionIdArg, connectedArg)
+              listOf(null)
+            } catch (exception: Throwable) {
+              TrackingApiPigeonUtils.wrapError(exception)
+            }
+            reply.reply(wrapped)
           }
         } else {
           channel.setMessageHandler(null)

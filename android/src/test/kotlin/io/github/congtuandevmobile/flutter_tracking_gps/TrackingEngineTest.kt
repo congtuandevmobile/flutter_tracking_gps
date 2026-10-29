@@ -67,6 +67,25 @@ private class FakeSteps(var status: NativeStepsStatus = NativeStepsStatus.ACTIVE
     suspend fun push(raw: Long, atMs: Long = MONO) = channel.emit(StepSample(raw, atMs))
 }
 
+private class FakeAccel(var status: NativeMotionStatus = NativeMotionStatus.ACTIVE, var failure: Throwable? = null) : AccelerometerSource {
+    private val channel = MutableSharedFlow<AccelSample>(extraBufferCapacity = 4096)
+    @Volatile var collectors = 0
+
+    override fun status(): NativeMotionStatus = status
+
+    override fun samples(): Flow<AccelSample> = flow {
+        collectors += 1
+        try {
+            failure?.let { throw it }
+            emitAll(channel)
+        } finally {
+            collectors -= 1
+        }
+    }
+
+    suspend fun push(atMs: Long, x: Double, y: Double, z: Double) = channel.emit(AccelSample(atMs, x, y, z))
+}
+
 /** An in-memory journal store: the lines a real one would hold, plus counters to assert on. */
 private class MemoryJournalStore : JournalStore {
     val files = HashMap<String, MutableList<String>>()
@@ -129,9 +148,9 @@ private fun engineConfig(stride: Double = -1.0, maxSpeed: Double = 10.0) = Engin
 
 private fun startConfig(
     id: String = "s", adaptive: Boolean = false, steps: Boolean = false, engine: EngineConfig = engineConfig(),
-    recover: Boolean = false, maxGapMs: Long = 0,
+    recover: Boolean = false, maxGapMs: Long = 0, pedalCadence: Boolean = false,
 ) = StartConfig(
-    stepsEnabled = steps, initialSteps = 0,
+    stepsEnabled = steps, initialSteps = 0, pedalCadence = pedalCadence,
     sessionId = id, startSeq = 0, startSegmentId = 0, intervalMs = 1000, minDistanceMeters = 0.0,
     notificationTitle = "t", notificationText = "x", engine = engine,
     adaptiveSampling = adaptive, batterySaver = false,
@@ -142,8 +161,11 @@ private fun startConfig(
 class TrackingEngineTest {
     private var clock = MONO
 
-    private fun engine(source: FakeSource, store: MemoryJournalStore, steps: StepSource = NoStepSource): TrackingEngine = TrackingEngine(
-        source = source, store = store, stepSource = steps,
+    private fun engine(
+        source: FakeSource, store: MemoryJournalStore, steps: StepSource = NoStepSource,
+        accel: AccelerometerSource = NoAccelerometerSource,
+    ): TrackingEngine = TrackingEngine(
+        source = source, store = store, stepSource = steps, accelerometerSource = accel,
         scope = CoroutineScope(UnconfinedTestDispatcher()),
         wallClockMs = { BASE + (clock - MONO) },
         monotonicMs = { clock },
@@ -411,6 +433,206 @@ class TrackingEngineTest {
         val s = engine.snapshot()
         assertEquals(6L, s.distance.steps)
         assertTrue(abs(s.distance.pendingPdrMeters - 6.0) < 1e-6, "pending ${s.distance.pendingPdrMeters}")
+    }
+
+    /** A leg-mounted phone at ~50 Hz for [seconds]: gravity plus a periodic motion at [rpm], on the sensor's clock. */
+    private suspend fun FakeAccel.pedal(fromSec: Int, seconds: Int, rpm: Double) {
+        val w = 2.0 * Math.PI * rpm / 60.0
+        var t = fromSec * 1000L
+        val end = (fromSec + seconds) * 1000L
+        while (t < end) {
+            val s = 1.5 * Math.sin(w * t / 1000.0)
+            push(MONO + t, 0.6 * s, -0.5 * s, 9.81 + 0.62 * s)
+            t += 20
+        }
+        clock = MONO + end
+    }
+
+    @Test
+    fun pedalCadenceFromTheAccelerometerAppearsInTheSnapshotAndNeverInTheDistance() = runTest {
+        val accel = FakeAccel()
+        val engine = engine(FakeSource(), MemoryJournalStore(), accel = accel)
+        engine.start(startConfig(pedalCadence = true))
+        assertEquals(NativeMotionStatus.ACTIVE, engine.snapshot().cadenceStatus)
+        assertTrue(engine.snapshot().pedalCadenceRpm < 0, "unknown until a window was seen")
+        accel.pedal(0, 14, 90.0)
+        val s = engine.snapshot()
+        assertTrue(abs(s.pedalCadenceRpm - 90.0) <= 4.0, "rpm ${s.pedalCadenceRpm}")
+        assertEquals(0.0, s.distance.totalMeters, 0.0)
+    }
+
+    @Test
+    fun pedalCadenceIsOffUnlessAskedFor() = runTest {
+        val accel = FakeAccel()
+        val engine = engine(FakeSource(), MemoryJournalStore(), accel = accel)
+        engine.start(startConfig())
+        assertEquals(NativeMotionStatus.OFF, engine.snapshot().cadenceStatus)
+        assertEquals(0, accel.collectors, "the accelerometer is not touched")
+        assertTrue(engine.snapshot().pedalCadenceRpm < 0)
+    }
+
+    @Test
+    fun pauseUnregistersTheAccelerometerAndAPausedSessionHasNoCadence() = runTest {
+        val accel = FakeAccel()
+        val engine = engine(FakeSource(), MemoryJournalStore(), accel = accel)
+        engine.start(startConfig(pedalCadence = true))
+        assertEquals(1, accel.collectors)
+        accel.pedal(0, 14, 90.0)
+        assertTrue(engine.snapshot().pedalCadenceRpm > 0)
+        engine.pause("s")
+        assertEquals(0, accel.collectors)
+        assertTrue(engine.snapshot().pedalCadenceRpm < 0, "no cadence while paused")
+        engine.resume("s")
+        assertEquals(1, accel.collectors)
+        assertTrue(engine.snapshot().pedalCadenceRpm < 0, "a new segment starts with an empty window")
+    }
+
+    @Test
+    fun aMissingAccelerometerNeverStopsTheRecording() = runTest {
+        val accel = FakeAccel(NativeMotionStatus.UNAVAILABLE)
+        val engine = engine(FakeSource(), MemoryJournalStore(), accel = accel)
+        val s = engine.start(startConfig(pedalCadence = true))
+        assertEquals(NativeMotionStatus.UNAVAILABLE, s.cadenceStatus)
+        assertEquals(NativeTrackingState.RUNNING, s.state)
+        assertEquals(0, accel.collectors)
+    }
+
+    private fun csc(count: Int, ticks: Int) = byteArrayOf(
+        0x02, count.toByte(), (count shr 8).toByte(), ticks.toByte(), (ticks shr 8).toByte(),
+    )
+
+    /** A crank sensor at 80 rpm: a revolution every 750 ms, a notification each time, on the engine's clock. */
+    private fun TrackingEngine.crank(fromMs: Long, toMs: Long, id: String = "s", conn: Long = 1) {
+        var t = fromMs
+        var count = 100
+        var ticks = 1000
+        while (t <= toMs) {
+            clock = MONO + t
+            pushCsc(id, "sensor", conn, csc(count, ticks))
+            count += 1; ticks += 768; t += 750
+        }
+    }
+
+    @Test
+    fun anExternalCrankSensorWinsOverThePhoneAndNeverTouchesTheDistance() = runTest {
+        val accel = FakeAccel()
+        val engine = engine(FakeSource(), MemoryJournalStore(), accel = accel)
+        engine.start(startConfig(pedalCadence = true))
+        accel.pedal(0, 14, 90.0)
+        assertEquals(NativeCadenceSource.PHONE, engine.snapshot().cadenceSource)
+        engine.setExternalConnected("s", "sensor", 1, true)
+        engine.crank(14_000, 17_000)
+        val s = engine.snapshot()
+        assertEquals(NativeCadenceSource.EXTERNAL_SENSOR, s.cadenceSource)
+        assertEquals(80.0, s.pedalCadenceRpm, 0.5)
+        assertEquals(0.0, s.distance.totalMeters, 0.0)
+    }
+
+    @Test
+    fun anExternalSensorWorksWithoutThePhoneEstimate() = runTest {
+        val engine = engine(FakeSource(), MemoryJournalStore())
+        engine.start(startConfig())
+        engine.setExternalConnected("s", "sensor", 1, true)
+        engine.crank(0, 3000)
+        val s = engine.snapshot()
+        assertEquals(NativeMotionStatus.OFF, s.cadenceStatus)
+        assertEquals(NativeCadenceSource.EXTERNAL_SENSOR, s.cadenceSource)
+        assertEquals(80.0, s.pedalCadenceRpm, 0.5)
+    }
+
+    /** The phone pedals at [phoneRpm] while the crank sensor sends [packet] for each second, both on the engine's clock. */
+    private suspend fun FakeAccel.pedalWithSensor(
+        engine: TrackingEngine, fromSec: Int, seconds: Int, phoneRpm: Double, packet: (Int) -> ByteArray,
+    ) {
+        for (sec in fromSec until fromSec + seconds) {
+            pedal(sec, 1, phoneRpm)
+            engine.pushCsc("s", "sensor", 1, packet(sec))
+        }
+    }
+
+    /** A crank at 60 rpm: one revolution a second, one notification a second. */
+    private fun sixty(sec: Int) = csc(100 + sec, 1000 + sec * 1024)
+
+    @Test
+    fun aStillCrankIsZeroNotUnknownAndNotThePhone() = runTest {
+        val accel = FakeAccel()
+        val engine = engine(FakeSource(), MemoryJournalStore(), accel = accel)
+        engine.start(startConfig(pedalCadence = true))
+        engine.setExternalConnected("s", "sensor", 1, true)
+        accel.pedalWithSensor(engine, 0, 6, 90.0, ::sixty)
+        // The legs of the phone keep a rhythm, but the crank sensor says the cranks stopped turning.
+        accel.pedalWithSensor(engine, 6, 14, 90.0) { csc(106, 1000 + 6 * 1024) }
+        val s = engine.snapshot()
+        assertEquals(NativeCadenceSource.EXTERNAL_SENSOR, s.cadenceSource)
+        assertEquals(0.0, s.pedalCadenceRpm, 0.0)
+    }
+
+    @Test
+    fun losingTheExternalSensorFallsBackToThePhoneAtOnce() = runTest {
+        val accel = FakeAccel()
+        val engine = engine(FakeSource(), MemoryJournalStore(), accel = accel)
+        engine.start(startConfig(pedalCadence = true))
+        engine.setExternalConnected("s", "sensor", 1, true)
+        accel.pedalWithSensor(engine, 0, 14, 90.0, ::sixty)
+        val before = engine.snapshot()
+        assertEquals(NativeCadenceSource.EXTERNAL_SENSOR, before.cadenceSource)
+        assertEquals(60.0, before.pedalCadenceRpm, 0.5)
+        engine.setExternalConnected("s", "sensor", 1, false)
+        val s = engine.snapshot()
+        assertEquals(NativeCadenceSource.PHONE, s.cadenceSource)
+        assertTrue(abs(s.pedalCadenceRpm - 90.0) <= 4.0, "rpm ${s.pedalCadenceRpm}")
+    }
+
+    @Test
+    fun externalCadenceOfAnotherSessionOrAFinishedOneIsDropped() = runTest {
+        val engine = engine(FakeSource(), MemoryJournalStore())
+        engine.start(startConfig())
+        engine.setExternalConnected("other", "sensor", 1, true)
+        engine.crank(0, 3000, id = "other")
+        assertEquals(NativeCadenceSource.NONE, engine.snapshot().cadenceSource)
+        engine.stop("s")
+        engine.setExternalConnected("s", "sensor", 1, true)
+        engine.crank(4000, 7000)
+        assertTrue(engine.snapshot().pedalCadenceRpm < 0)
+    }
+
+    @Test
+    fun aPausedSessionShowsNoExternalCadenceAndResumesWithAHealthySensor() = runTest {
+        val engine = engine(FakeSource(), MemoryJournalStore())
+        engine.start(startConfig())
+        engine.setExternalConnected("s", "sensor", 1, true)
+        engine.crank(0, 3000)
+        engine.pause("s")
+        assertTrue(engine.snapshot().pedalCadenceRpm < 0, "no cadence while paused")
+        engine.crank(3750, 5250) // the sensor keeps notifying during the pause
+        engine.resume("s")
+        assertEquals(NativeCadenceSource.EXTERNAL_SENSOR, engine.snapshot().cadenceSource)
+    }
+
+    @Test
+    fun garbageFromTheHostNeverBreaksTheRecording() = runTest {
+        val engine = engine(FakeSource(), MemoryJournalStore())
+        engine.start(startConfig())
+        engine.setExternalConnected("s", "sensor", 1, true)
+        engine.pushCsc("s", "sensor", 1, byteArrayOf())
+        engine.pushCsc("s", "sensor", 1, byteArrayOf(0x02, 1))
+        engine.pushExternalRpm("s", "sensor", 1, Double.NaN)
+        engine.pushExternalRpm("s", "sensor", 1, 9999.0)
+        val s = engine.snapshot()
+        assertEquals(NativeTrackingState.RUNNING, s.state)
+        assertEquals(NativeCadenceSource.NONE, s.cadenceSource)
+    }
+
+    @Test
+    fun aFailingAccelerometerIsReportedAndTheRecordingGoesOn() = runTest {
+        val accel = FakeAccel(failure = IllegalStateException("sensor died"))
+        val engine = engine(FakeSource(), MemoryJournalStore(), accel = accel)
+        engine.start(startConfig(pedalCadence = true))
+        val s = engine.snapshot()
+        assertEquals(NativeMotionStatus.FAILED, s.cadenceStatus)
+        assertNotNull(s.error)
+        assertTrue(s.error!!.startsWith(TrackingErrorCode.CADENCE_FAILED))
+        assertEquals(NativeTrackingState.RUNNING, s.state)
     }
 
     @Test

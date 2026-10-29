@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:typed_data';
+
 import 'package:flutter_tracking_gps/src/api/presenter_dispatcher.dart';
 import 'package:flutter_tracking_gps/src/api/tracking_presenter.dart';
 import 'package:flutter_tracking_gps/src/domain/tracking_config.dart';
@@ -27,6 +29,7 @@ class TrackingSession {
     this.notificationText = 'Tracking your activity. Tap to return to the app.',
     this.stepsEnabled = false,
     this.initialSteps = 0,
+    this.pedalCadence = false,
     this.presenter,
     this.onPresenterError,
     this.presenterTimeout = const Duration(seconds: 5),
@@ -57,6 +60,13 @@ class TrackingSession {
   /// Session steps to restore after a process death (the device counter is never
   /// added to it); 0 for a new session.
   final int initialSteps;
+
+  /// Estimate the pedalling cadence (rpm) from the accelerometer of a phone carried ON THE LEG (trouser pocket,
+  /// thigh); read it from `snapshot.pedalCadenceRpm`. It needs no permission. Live only: it is not journaled and
+  /// does not affect distance; a restore does not carry it back until a new window has been seen. It means nothing
+  /// with the phone on the handlebar, and it is an estimate that is not validated on a real bike. For a precise
+  /// rpm use a BLE cadence sensor, which this package does not support.
+  final bool pedalCadence;
 
   /// Shows the recording outside the app (a Live Activity, an ongoing
   /// notification...). null = none: iOS shows nothing extra and Android shows the
@@ -125,6 +135,7 @@ class TrackingSession {
       notificationText: notificationText,
       stepsEnabled: stepsEnabled,
       initialSteps: initialSteps,
+      pedalCadence: pedalCadence,
     );
     _requireRunning(native);
     _apply(native);
@@ -235,6 +246,45 @@ class TrackingSession {
     await _platform.submitPdr(id, _last.segmentId, meters);
   }
 
+  /// Tells the SDK that the HOST connected to (or lost) an external cadence sensor. The SDK does not scan, pair or
+  /// reconnect: a BLE component of the app does, and reports here. [sourceId] names the device; [connectionId] is a
+  /// number the app increases for every new connection to it, so the counters of an old connection are never mixed
+  /// with a new one. Losing the sensor makes `pedalCadenceRpm` fall back to the phone estimate at once.
+  Future<void> setExternalCadenceConnected({
+    required String sourceId,
+    required int connectionId,
+    required bool connected,
+  }) async {
+    final id = _sessionId;
+    if (id == null) return;
+    await _platform.setExternalCadenceConnected(id, sourceId, connectionId, connected);
+  }
+
+  /// One raw Bluetooth CSC Measurement (characteristic 0x2A5B, the bytes of the notification) from the external
+  /// sensor. The SDK decodes it and handles the 16-bit rollover, wheel-only packets and a reset sensor. Not journaled;
+  /// no effect on distance. Dropped when [sourceId]/[connectionId] are not the open connection.
+  Future<void> pushCscMeasurement(
+    Uint8List data, {
+    required String sourceId,
+    required int connectionId,
+  }) async {
+    final id = _sessionId;
+    if (id == null) return;
+    await _platform.pushCscMeasurement(id, sourceId, connectionId, data);
+  }
+
+  /// A cadence already in rpm from a source that is not CSC (for example a power meter). 0 means the cranks are
+  /// still; a missing measurement must not be sent as 0.
+  Future<void> pushExternalCadence(
+    double rpm, {
+    required String sourceId,
+    required int connectionId,
+  }) async {
+    final id = _sessionId;
+    if (id == null) return;
+    await _platform.pushExternalCadence(id, sourceId, connectionId, rpm);
+  }
+
   Future<void> dispose() async {
     await _sub?.cancel();
     _sub = null;
@@ -300,6 +350,9 @@ class TrackingSession {
       recoveredGap: native.recoveredGap,
       clockAnomaly: native.clockAnomaly,
       collection: native.collection,
+      pedalCadenceRpm: native.pedalCadenceRpm,
+      cadenceStatus: native.cadenceStatus,
+      cadenceSource: native.cadenceSource,
       distanceEligibleSteps: d.distanceEligibleSteps,
       activeTime: d.activeTime,
       bridgedGap: d.bridgedGap,

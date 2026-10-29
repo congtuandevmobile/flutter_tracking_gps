@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:flutter_tracking_gps/src/domain/tracking_config.dart';
 import 'package:flutter_tracking_gps/src/domain/tracking_fix.dart';
 import 'package:flutter_tracking_gps/src/domain/tracking_state.dart';
@@ -103,6 +105,9 @@ class PlatformSnapshot {
     this.recoveredGap = Duration.zero,
     this.clockAnomaly = false,
     this.collection = CollectionState.notCollecting,
+    this.pedalCadenceRpm,
+    this.cadenceStatus = PedalCadenceStatus.off,
+    this.cadenceSource = CadenceSource.none,
     this.sessionId,
     this.error,
   });
@@ -114,6 +119,11 @@ class PlatformSnapshot {
   final PlatformDistance distance;
   final StepsStatus stepsStatus;
   final bool stepsFinal;
+
+  /// Pedal cadence from the accelerometer in rpm; null = unknown.
+  final double? pedalCadenceRpm;
+  final PedalCadenceStatus cadenceStatus;
+  final CadenceSource cadenceSource;
 
   /// Events accepted but not on disk yet (see `TrackingSnapshot.isDurable`).
   final int journalPending;
@@ -163,6 +173,7 @@ abstract interface class TrackingPlatform {
     required String notificationText,
     required bool stepsEnabled,
     required int initialSteps,
+    bool pedalCadence = false,
   });
 
   /// Rebuilds the native engine of [sessionId] from the persisted fixes after a
@@ -191,6 +202,12 @@ abstract interface class TrackingPlatform {
 
   /// A step-based estimate for a stretch without GPS (held as pending).
   Future<void> submitPdr(String sessionId, int segmentId, double meters);
+
+  /// External cadence input (see `TrackingSession.pushCscMeasurement`): live only, dropped when it is not for the
+  /// current session or connection.
+  Future<void> pushCscMeasurement(String sessionId, String sourceId, int connectionId, Uint8List data);
+  Future<void> pushExternalCadence(String sessionId, String sourceId, int connectionId, double rpm);
+  Future<void> setExternalCadenceConnected(String sessionId, String sourceId, int connectionId, bool connected);
 
   /// Coordinate-free timeline of what the native engine decided.
   Future<String> report();

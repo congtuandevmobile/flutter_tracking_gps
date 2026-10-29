@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_tracking_gps/flutter_tracking_gps.dart';
@@ -15,6 +16,8 @@ class FakePlatform implements TrackingPlatform {
   List<TrackingFix> persisted = [];
   final calls = <String>[];
   bool? lastStepsEnabled;
+  bool? lastPedalCadence;
+  final external = <String>[];
   late GpsDistanceEngine engine;
   String? sessionId;
   int segment = 0;
@@ -78,9 +81,11 @@ class FakePlatform implements TrackingPlatform {
     required String notificationText,
     required bool stepsEnabled,
     required int initialSteps,
+    bool pedalCadence = false,
   }) async {
     calls.add('start');
     lastStepsEnabled = stepsEnabled;
+    lastPedalCadence = pedalCadence;
     this.sessionId = sessionId;
     segment = startSegmentId;
     engine = GpsDistanceEngine(config: config)..start(sessionId, t0);
@@ -159,6 +164,18 @@ class FakePlatform implements TrackingPlatform {
   Future<PlatformSnapshot> snapshot() async => _snap();
 
   @override
+  Future<void> pushCscMeasurement(String sessionId, String sourceId, int connectionId, Uint8List data) async =>
+      external.add('csc:$sessionId:$sourceId:$connectionId:${data.length}');
+
+  @override
+  Future<void> pushExternalCadence(String sessionId, String sourceId, int connectionId, double rpm) async =>
+      external.add('rpm:$sessionId:$sourceId:$connectionId:$rpm');
+
+  @override
+  Future<void> setExternalCadenceConnected(String sessionId, String sourceId, int connectionId, bool connected) async =>
+      external.add('conn:$sessionId:$sourceId:$connectionId:$connected');
+
+  @override
   Future<void> submitPdr(String sessionId, int segmentId, double meters) async {
     calls.add('pdr');
     engine.submitPdr(t0, meters, segmentId: segmentId);
@@ -235,6 +252,69 @@ void main() {
     );
     await pumpEvents();
     expect(session.snapshot.fixCount, 0);
+    await session.dispose();
+  });
+
+  test('pedalCadence is passed to native, off by default, and the rpm reaches the snapshot', () async {
+    final platform = FakePlatform();
+    final off = TrackingSession(platform: platform);
+    await off.start(sessionId: 'a');
+    expect(platform.lastPedalCadence, false);
+    expect(off.snapshot.pedalCadenceRpm, isNull);
+    expect(off.snapshot.cadenceStatus, PedalCadenceStatus.off);
+    await off.dispose();
+
+    final on = TrackingSession(platform: platform, pedalCadence: true);
+    await on.start(sessionId: 'b');
+    expect(platform.lastPedalCadence, true);
+    platform.snapshotController.add(
+      const PlatformSnapshot(
+        sessionId: 'b',
+        state: PlatformState.running,
+        segmentId: 0,
+        fixCount: 0,
+        pedalCadenceRpm: 87.5,
+        cadenceStatus: PedalCadenceStatus.active,
+      ),
+    );
+    await pumpEvents();
+    expect(on.snapshot.pedalCadenceRpm, 87.5);
+    expect(on.snapshot.cadenceStatus, PedalCadenceStatus.active);
+    await on.dispose();
+  });
+
+  test('the cadence source of the snapshot reaches the app, 0 rpm included', () async {
+    final platform = FakePlatform();
+    final session = TrackingSession(platform: platform);
+    await session.start(sessionId: 'a');
+    expect(session.snapshot.cadenceSource, CadenceSource.none);
+    platform.snapshotController.add(
+      const PlatformSnapshot(
+        sessionId: 'a',
+        state: PlatformState.running,
+        segmentId: 0,
+        fixCount: 0,
+        pedalCadenceRpm: 0,
+        cadenceSource: CadenceSource.externalSensor,
+      ),
+    );
+    await pumpEvents();
+    expect(session.snapshot.pedalCadenceRpm, 0);
+    expect(session.snapshot.cadenceSource, CadenceSource.externalSensor);
+    await session.dispose();
+  });
+
+  test('external cadence is forwarded with the session id, and ignored when there is no session', () async {
+    final platform = FakePlatform();
+    final session = TrackingSession(platform: platform);
+    await session.pushExternalCadence(80, sourceId: 'x', connectionId: 1);
+    await session.setExternalCadenceConnected(sourceId: 'x', connectionId: 1, connected: true);
+    expect(platform.external, isEmpty, reason: 'no session yet');
+    await session.start(sessionId: 'a');
+    await session.setExternalCadenceConnected(sourceId: 'x', connectionId: 1, connected: true);
+    await session.pushCscMeasurement(Uint8List.fromList([2, 1, 0, 1, 0]), sourceId: 'x', connectionId: 1);
+    await session.pushExternalCadence(0, sourceId: 'x', connectionId: 1);
+    expect(platform.external, ['conn:a:x:1:true', 'csc:a:x:1:5', 'rpm:a:x:1:0.0']);
     await session.dispose();
   });
 

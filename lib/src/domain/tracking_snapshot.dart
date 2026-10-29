@@ -37,6 +37,9 @@ class TrackingSnapshot {
     this.uncreditedGap = Duration.zero,
     this.uncreditedGaps = 0,
     this.ambiguousSteps = 0,
+    this.pedalCadenceRpm,
+    this.cadenceStatus = PedalCadenceStatus.off,
+    this.cadenceSource = CadenceSource.none,
   });
 
   const TrackingSnapshot.idle()
@@ -73,7 +76,10 @@ class TrackingSnapshot {
       bridgedGap = Duration.zero,
       uncreditedGap = Duration.zero,
       uncreditedGaps = 0,
-      ambiguousSteps = 0;
+      ambiguousSteps = 0,
+      pedalCadenceRpm = null,
+      cadenceStatus = PedalCadenceStatus.off,
+      cadenceSource = CadenceSource.none;
 
   final String? sessionId;
   final RecordingState state;
@@ -107,6 +113,21 @@ class TrackingSnapshot {
 
   /// Learned (or configured) metres per step; null while unknown.
   final double? strideMeters;
+
+  /// Pedalling cadence in revolutions per minute from the best available source ([cadenceSource]); null = unknown.
+  ///  - A healthy external sensor that the host feeds (`TrackingSession.pushCscMeasurement` / `pushExternalCadence`)
+  ///    wins: it is a MEASUREMENT, and 0 means the cranks are still (not "no data").
+  ///  - Otherwise the phone accelerometer estimate (`createSession(pedalCadence: true)`), an ESTIMATE that only means
+  ///    something with the phone on the leg (pocket, thigh), never on the handlebar, and not validated on a real bike.
+  ///  - Otherwise null (no source, warming up, no clear rhythm, a paused session).
+  /// Live only: not journaled, no effect on distance, null again after a restore until new data arrives.
+  final double? pedalCadenceRpm;
+
+  /// State of the native accelerometer feeding the phone estimate (not about an external sensor).
+  final PedalCadenceStatus cadenceStatus;
+
+  /// Which source [pedalCadenceRpm] came from.
+  final CadenceSource cadenceSource;
 
   /// State of the native step sensor (off unless `stepsEnabled` was asked for).
   final StepsStatus stepsStatus;
@@ -215,7 +236,10 @@ class TrackingSnapshot {
           other.bridgedGap == bridgedGap &&
           other.uncreditedGap == uncreditedGap &&
           other.uncreditedGaps == uncreditedGaps &&
-          other.ambiguousSteps == ambiguousSteps;
+          other.ambiguousSteps == ambiguousSteps &&
+          other.pedalCadenceRpm == pedalCadenceRpm &&
+          other.cadenceStatus == cadenceStatus &&
+          other.cadenceSource == cadenceSource;
 
   @override
   int get hashCode => Object.hashAll([
@@ -253,5 +277,8 @@ class TrackingSnapshot {
         uncreditedGap,
         uncreditedGaps,
         ambiguousSteps,
+        pedalCadenceRpm,
+        cadenceStatus,
+        cadenceSource,
       ]);
 }
